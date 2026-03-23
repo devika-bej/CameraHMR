@@ -31,7 +31,7 @@ def init_detector(threshold):
     return DefaultPredictor_Lazy(detectron2_cfg)
 
 
-def process_image(args, image_path, model, detector, device, output_folder):
+def process_image(args, image_path, model, detector, device, output_folder, estimation_data=None):
     """Process a single image and save the output visualization."""
     img_cv2 = cv2.imread(str(image_path))
     det_out = detector(img_cv2)
@@ -63,6 +63,9 @@ def process_image(args, image_path, model, detector, device, output_folder):
             ax.imshow(img)
 
             pred_vertices = out['pred_keypoints'][ind].detach().cpu().numpy()
+            
+            estimation_data['dense_kp'].append(pred_vertices)
+            
             pred_vertices = (pred_vertices + 0.5) * 256
             confidences = pred_vertices[:, 2]
         
@@ -88,6 +91,7 @@ def main():
     parser.add_argument('--detector_threshold', type=float, default=0.25, help='Detection threshold')
     parser.add_argument('--vmin', type=float, default=-500., help='Minimum possible sigma value for the checkpoint')
     parser.add_argument('--vmax', type=float, default=1500., help='Maximum possible sigma value for the checkpoint')
+    parser.add_argument('--npz_file', type=str, default='demo_out', help='Path to save keypoints in .npz format')
     # vmin and vmax depends on the checkpoint and how long the model is trained
 
     args = parser.parse_args()
@@ -99,9 +103,16 @@ def main():
 
     image_extensions = ('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.webp')
     image_paths = [img for ext in image_extensions for img in glob(os.path.join(args.img_folder, ext))]
+    image_paths = sorted(image_paths)  # Sort for consistent processing order
     
-    for img_path in image_paths:
-        process_image(args, img_path, model, detector, device, args.out_folder)
+    estimation_data = np.load(args.npz_file) if os.path.exists(args.npz_file) else None
+    estimation_data = dict(estimation_data) if estimation_data is not None else None
+    estimation_data['dense_kp'] = []  # Initialize list to store dense keypoints
+    
+    for ind, img_path in enumerate(image_paths):
+        process_image(args, img_path, model, detector, device, args.out_folder, estimation_data)
+    
+    np.savez(args.npz_file, **estimation_data)
 
 
 if __name__ == '__main__':

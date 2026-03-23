@@ -9,8 +9,11 @@ from glob import glob
 from torchvision.transforms import Normalize
 from detectron2.config import LazyConfig
 from core.utils.utils_detectron2 import DefaultPredictor_Lazy
+from core.utils.train_utils import denormalize_images
+from core.utils.geometry import batch_rot2aa
 
 from core.datasets.dataset import Dataset
+from core.densekp_trainer import DenseKP
 from core.utils.renderer_pyrd import Renderer
 from core.utils import recursive_to
 from core.utils.geometry import batch_rot2aa
@@ -49,6 +52,7 @@ class HumanMeshEstimator:
         self.model = self.init_model()
         self.detector = self.init_detector(threshold)
         self.cam_model = self.init_cam_model()
+        # self.densekp_model = self.init_densekp_model()
 
         if self.model_type == 'smpl':
             from core.constants import SMPL_MODEL_PATH
@@ -92,6 +96,11 @@ class HumanMeshEstimator:
             detectron2_cfg.model.roi_heads.box_predictors[i].test_score_thresh = threshold
         detector = DefaultPredictor_Lazy(detectron2_cfg)
         return detector
+    
+    def init_densekp_model(self):
+        from core.constants import DENSEKP_CKPT
+        model = DenseKP.load_from_checkpoint(DENSEKP_CKPT, strict=False).to(self.device).eval()
+        return model
 
     
     def convert_to_full_img_cam(self, pare_cam, bbox_height, bbox_center, img_w, img_h, focal_length):
@@ -137,15 +146,17 @@ class HumanMeshEstimator:
         smpl.body_pose[0][0][:] = np.zeros(3)
 
 
-    def process_image(self, img_path, output_img_folder, i):
+
+    def process_image(self, img_path, output_img_folder, i, npz_output):
         img_cv2 = cv2.imread(str(img_path))
         img_cv2 = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB)
+        npz_output['imgname'].append(os.path.basename(img_path))
         
         fname, img_ext = os.path.splitext(os.path.basename(img_path))
         overlay_fname = os.path.join(output_img_folder, f'{os.path.basename(fname)}_{i:06d}{img_ext}')
         smpl_fname = os.path.join(output_img_folder, f'{os.path.basename(fname)}_{i:06d}.smpl')
         mesh_fname = os.path.join(output_img_folder, f'{os.path.basename(fname)}_{i:06d}.obj')
-        print(img_path)
+        # print(img_path)
         # Detect humans in the image
         det_out = self.detector(img_cv2)
         det_instances = det_out['instances']
@@ -153,9 +164,12 @@ class HumanMeshEstimator:
         boxes = det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
         bbox_scale = (boxes[:, 2:4] - boxes[:, 0:2]) / 200.0 
         bbox_center = (boxes[:, 2:4] + boxes[:, 0:2]) / 2.0
+        npz_output['center'].append(bbox_center[0])
+        npz_output['scale'].append(bbox_scale[0])
 
         # Get Camera intrinsics using HumanFoV Model
         cam_int = self.get_cam_intrinsics(img_cv2)
+        npz_output['cam_int'].append(cam_int)
         dataset = Dataset(img_cv2, bbox_center, bbox_scale, cam_int, False, img_path)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=False, num_workers=10)
 
@@ -164,8 +178,25 @@ class HumanMeshEstimator:
             img_h, img_w = batch['img_size'][0]
             with torch.no_grad():
                 out_smpl_params, out_cam, focal_length_ = self.model(batch)
+                # out_densekp = self.densekp_model(batch)
+                
+            if self.model_type == 'smplx':
+                npz_output['global_orient'].append(batch_rot2aa(out_smpl_params['global_orient'][0]).cpu().numpy())
+                npz_output['body_pose'].append(batch_rot2aa(out_smpl_params['body_pose'][0]).cpu().numpy())
+                npz_output['left_hand_pose'].append(batch_rot2aa(out_smpl_params['left_hand_pose'][0]).cpu().numpy())
+                npz_output['right_hand_pose'].append(batch_rot2aa(out_smpl_params['right_hand_pose'][0]).cpu().numpy())
+                npz_output['shape'].append(out_smpl_params['betas'][0].cpu().numpy())
+            else:
+                global_orient = batch_rot2aa(out_smpl_params['global_orient'][0]).cpu().numpy()
+                body_pose = batch_rot2aa(out_smpl_params['body_pose'][0]).cpu().numpy()
+                npz_output['pose'].append(np.concatenate([global_orient, body_pose], axis=0))
+                npz_output['shape'].append(out_smpl_params['betas'][0].cpu().numpy())
 
             output_vertices, output_joints, output_cam_trans = self.get_output_mesh(out_smpl_params, out_cam, batch)
+            npz_output['cam_t'].append(output_cam_trans[0].cpu().numpy())
+            
+            # npz_output['dense_kp'].append([])
+            # npz_output['gt_keypoints'].append([])
 
             mesh = trimesh.Trimesh(output_vertices[0].cpu().numpy() , self.body_model.faces,
                             process=False)
@@ -187,5 +218,12 @@ class HumanMeshEstimator:
             os.makedirs(out_folder)
         image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.bmp', '*.tiff', '*.webp']
         images_list = [image for ext in image_extensions for image in glob(os.path.join(image_folder, ext))]
+        images_list = sorted(images_list)
+        if self.model_type == 'smplx':
+            npz_output = {'imgname': [], 'global_orient': [], 'body_pose': [], 'left_hand_pose': [], 'right_hand_pose': [], 'shape': [], 'cam_t': [], 'cam_int': [], 'center': [], 'scale': [], 'gt_keypoints': [], 'dense_kp': []} 
+        else:
+            npz_output = {'imgname': [], 'pose': [], 'shape': [], 'cam_t': [], 'cam_int': [], 'center': [], 'scale': [], 'gt_keypoints': [], 'dense_kp': []}
         for ind, img_path in enumerate(images_list):
-            self.process_image(img_path, out_folder, ind)
+            self.process_image(img_path, out_folder, ind, npz_output)
+            img_name = os.path.splitext(os.path.basename(img_path))[0]
+        np.savez(os.path.join(out_folder, 'mesh_estimation_output.npz'), **npz_output)
