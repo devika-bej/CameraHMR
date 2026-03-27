@@ -116,7 +116,7 @@ class SMPLifyX:
         cam_int = torch.tensor(cam_int, device=self.device, dtype=torch.float32, requires_grad=False)
         focal_length = cam_int[0, 0]
 
-        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose.squeeze(0), right_hand_pose=right_hand_pose.squeeze(0))
+        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
         model_joints_init = smpl_output.joints.detach()
         model_verts_init = smpl_output.vertices.detach()
 
@@ -151,7 +151,7 @@ class SMPLifyX:
         def run_optimization(optimizer, num_iters, pose_prior_weight, beta_prior_weight):
             nonlocal prev_loss
             for i in range(num_iters):
-                smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose.squeeze(0), right_hand_pose=right_hand_pose.squeeze(0))
+                smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
                 model_joints, model_verts = smpl_output.joints, smpl_output.vertices
                 model_verts_sampled = self.downsample_mat.matmul(model_verts)
 
@@ -193,7 +193,7 @@ class SMPLifyX:
 
         loss = run_optimization(body_optimizer, 300, pose_prior_weight, beta_prior_weight)
        
-        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose.squeeze(0), right_hand_pose=right_hand_pose.squeeze(0))
+        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
         model_joints_init, model_verts_init = smpl_output.joints.detach(), smpl_output.vertices.detach()
 
         # Phase 2 Optimization
@@ -206,7 +206,7 @@ class SMPLifyX:
 
         loss = run_optimization(body_optimizer, 300, pose_prior_weight, beta_prior_weight)
        
-        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose.squeeze(0), right_hand_pose=right_hand_pose.squeeze(0))
+        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
         model_joints_init, model_verts_init = smpl_output.joints.detach(), smpl_output.vertices.detach()
          
 
