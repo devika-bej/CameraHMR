@@ -93,3 +93,6 @@ JOINT_MAP = {
 'Head (H36M)': 53, 'Nose': 24, 'Left Eye': 26,
 'Right Eye': 25, 'Left Ear': 28, 'Right Ear': 27
 }
+
+smpl_to_openpose = [24, 12, 17, 19, 21, 16, 18, 20, 0, 2, 5, 8, 1, 4,
+                    7, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
