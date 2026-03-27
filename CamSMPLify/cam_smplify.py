@@ -18,10 +18,10 @@ def get_transform(center, scale, res):
     """Generate transformation matrix."""
     h = 200 * scale
     t = torch.zeros(3, 3, device=center.device)  # Ensure device consistency
-    t[0, 0] = res[1] / h
-    t[1, 1] = res[0]/ h
-    t[0, 2] = res[1] * (-center[0].float() / h + .5)
-    t[1, 2] = res[0] * (-center[1].float() / h + .5)
+    t[0, 0] = res[1] / h[0]
+    t[1, 1] = res[0]/ h[1]
+    t[0, 2] = res[1] * (-center[0].float() / h[0] + .5)
+    t[1, 2] = res[0] * (-center[1].float() / h[1] + .5)
     t[2, 2] = 1
     return t
 

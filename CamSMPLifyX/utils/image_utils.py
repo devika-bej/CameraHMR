@@ -17,10 +17,10 @@ def get_transform(center, scale, res, rot=0):
     """Generate transformation matrix."""
     h = 200 * scale
     t = np.zeros((3, 3))
-    t[0, 0] = float(res[1]) / h
-    t[1, 1] = float(res[0]) / h
-    t[0, 2] = res[1] * (-float(center[0]) / h + .5)
-    t[1, 2] = res[0] * (-float(center[1]) / h + .5)
+    t[0, 0] = float(res[1]) / h[0]
+    t[1, 1] = float(res[0]) / h[1]
+    t[0, 2] = res[1] * (-float(center[0]) / h[0] + .5)
+    t[1, 2] = res[0] * (-float(center[1]) / h[1] + .5)
     t[2, 2] = 1
     if not rot == 0:
         rot = -rot  # To match direction of rotation from cropping

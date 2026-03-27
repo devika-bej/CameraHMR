@@ -8,10 +8,10 @@ def get_transform(center, scale, res):
     """
     h = 200 * scale
     t = torch.zeros(3, 3, device=center.device)  # Ensure device consistency
-    t[0, 0] = res[1] / h
-    t[1, 1] = res[0] / h
-    t[0, 2] = res[1] * (-center[0].float() / h + 0.5)
-    t[1, 2] = res[0] * (-center[1].float() / h + 0.5)
+    t[0, 0] = res[1] / h[0]
+    t[1, 1] = res[0] / h[1]
+    t[0, 2] = res[1] * (-center[0].float() / h[0] + 0.5)
+    t[1, 2] = res[0] * (-center[1].float() / h[1] + 0.5)
     t[2, 2] = 1
     return t
 
@@ -63,7 +63,9 @@ def body_fitting_loss_dense(
     densekp_weight=0.0005,
     kp_weight=0.005,
     imgname=None, 
-    verbose=False
+    verbose=False,
+    left_hand_pose=None,
+    right_hand_pose=None,
 ):
     """
     Loss function for body fitting.
@@ -91,10 +93,15 @@ def body_fitting_loss_dense(
     pose_loss = 10 * ((body_pose[0] - init_pose[0])**2).sum(dim=[-1, -2])
     beta_loss = beta_prior_weight * ((init_betas - betas)**2).sum(dim=-1)
     
+    # Hand pose loss
+    lh_pose_loss = 10 * ((left_hand_pose[0])**2).sum(dim=[-1, -2]) if left_hand_pose is not None else 0
+    rh_pose_loss = 10 * ((right_hand_pose[0])**2).sum(dim=[-1, -2]) if right_hand_pose is not None else 0
+    
     # Total loss computation
     total_loss = (
         reprojection_loss + beta_loss + 
-        pose_loss + verts_init_loss + dense_loss
+        pose_loss + verts_init_loss + dense_loss +
+        lh_pose_loss + rh_pose_loss
     )
     
     # Dictionary of losses
@@ -104,7 +111,9 @@ def body_fitting_loss_dense(
         'verts': verts_init_loss,
         'dense': dense_loss,
         'pose_prior': pose_loss,
-        'shape_prior': beta_loss
+        'shape_prior': beta_loss,
+        'lh_pose_loss': lh_pose_loss,
+        'rh_pose_loss': rh_pose_loss,
     }
     
     if verbose:

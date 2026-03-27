@@ -64,7 +64,7 @@ class SMPLifyX:
         self.smplx = SMPLX(SMPLX_MODEL_DIR).to(self.device)
         self.vis = vis
         self.save_path = save_path
-        self.smplx2smpl = torch.from_numpy(pickle.load(open(SMPLX_2_SMPL, 'rb'))['matrix']).cuda()
+        self.smplx2smpl = torch.from_numpy(pickle.load(open(SMPLX2SMPL, 'rb'))['matrix']).cuda()
         self.downsample_mat = pickle.load(open(DOWNSAMPLE_MAT, 'rb')).to_dense().cuda()
 
             
@@ -80,7 +80,7 @@ class SMPLifyX:
             camera_center=(img_w / 2., img_h / 2.),
             camera_rotation=None,
             save_filename=None,
-            faces=self.smpl.faces,
+            faces=self.smplx.faces,
         )
         render_img = crop(render_img, bbox_center, bbox_scale, [IMG_RES, IMG_RES])
         render_img = np.clip(render_img * 255, 0, 255).astype(np.uint8)
@@ -96,13 +96,17 @@ class SMPLifyX:
         # pressed_key = cv2.waitKey()
 
 
-    def __call__(self, args, init_pose, init_betas, cam_t, bbox_center, bbox_scale, cam_int, imgname, joints_2d_=None,
+    def __call__(self, args, init_global_orient, init_body_pose, init_left_hand_pose, init_right_hand_pose, init_betas, cam_t, bbox_center, bbox_scale, cam_int, imgname, joints_2d_=None,
                  dense_kp=None, ind=-1):
-        body_pose = torch.tensor(init_pose[:, 3:], device=self.device, dtype=torch.float32, requires_grad=True)
-        init_pose_ = torch.tensor(init_pose[:, 3:], device=self.device, dtype=torch.float32)
+        body_pose = torch.tensor(init_body_pose, device=self.device, dtype=torch.float32, requires_grad=True)
+        init_pose_ = torch.tensor(init_body_pose, device=self.device, dtype=torch.float32)
 
-        global_orient = torch.tensor(init_pose[:, :3], device=self.device, dtype=torch.float32, requires_grad=True)
-        init_global_orient_ = torch.tensor(init_pose[:, :3], device=self.device, dtype=torch.float32)
+        global_orient = torch.tensor(init_global_orient, device=self.device, dtype=torch.float32, requires_grad=True)
+        init_global_orient_ = torch.tensor(init_global_orient, device=self.device, dtype=torch.float32)
+        
+        left_hand_pose = torch.tensor(init_left_hand_pose, device=self.device, dtype=torch.float32, requires_grad=True)
+        right_hand_pose = torch.tensor(init_right_hand_pose, device=self.device, dtype=torch.float32, requires_grad=True)
+        
         betas = torch.tensor(init_betas, device=self.device, dtype=torch.float32, requires_grad=True)
         init_betas_ = torch.tensor(init_betas, device=self.device, dtype=torch.float32)
 
@@ -112,7 +116,7 @@ class SMPLifyX:
         cam_int = torch.tensor(cam_int, device=self.device, dtype=torch.float32, requires_grad=False)
         focal_length = cam_int[0, 0]
 
-        smpl_output = self.smpl(global_orient=global_orient, body_pose=body_pose, betas=betas)
+        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
         model_joints_init = smpl_output.joints.detach()
         model_verts_init = smpl_output.vertices.detach()
 
@@ -147,7 +151,7 @@ class SMPLifyX:
         def run_optimization(optimizer, num_iters, pose_prior_weight, beta_prior_weight):
             nonlocal prev_loss
             for i in range(num_iters):
-                smpl_output = self.smpl(global_orient=global_orient, body_pose=body_pose, betas=betas)
+                smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
                 model_joints, model_verts = smpl_output.joints, smpl_output.vertices
                 model_verts_sampled = self.downsample_mat.matmul(model_verts)
 
@@ -157,7 +161,9 @@ class SMPLifyX:
                     camera_translation, bbox_center, bbox_scale, cam_int, joints_2d, joints_conf, dense_kp,
                     imgname=imgname, verbose=self.verbose,
                     pose_prior_weight=pose_prior_weight,
-                    beta_prior_weight=beta_prior_weight
+                    beta_prior_weight=beta_prior_weight,
+                    left_hand_pose=left_hand_pose,
+                    right_hand_pose=right_hand_pose,
                 )
                 
                 if prev_loss == float('inf'):
@@ -187,7 +193,7 @@ class SMPLifyX:
 
         loss = run_optimization(body_optimizer, 300, pose_prior_weight, beta_prior_weight)
        
-        smpl_output = self.smpl(global_orient=global_orient, body_pose=body_pose, betas=betas)
+        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
         model_joints_init, model_verts_init = smpl_output.joints.detach(), smpl_output.vertices.detach()
 
         # Phase 2 Optimization
@@ -200,7 +206,7 @@ class SMPLifyX:
 
         loss = run_optimization(body_optimizer, 300, pose_prior_weight, beta_prior_weight)
        
-        smpl_output = self.smpl(global_orient=global_orient, body_pose=body_pose, betas=betas)
+        smpl_output = self.smplx(global_orient=global_orient, body_pose=body_pose, betas=betas, left_hand_pose=left_hand_pose, right_hand_pose=right_hand_pose)
         model_joints_init, model_verts_init = smpl_output.joints.detach(), smpl_output.vertices.detach()
          
 
@@ -208,7 +214,9 @@ class SMPLifyX:
         init_global_orient_ = global_orient.detach().clone()
         init_betas_ = betas.detach().clone()
         body_pose.requires_grad = True
-        body_optimizer = torch.optim.Adam([body_pose, global_orient, camera_translation, betas], lr=self.step_size, betas=(0.9, 0.999))
+        left_hand_pose.requires_grad = True
+        right_hand_pose.requires_grad = True
+        body_optimizer = torch.optim.Adam([body_pose, global_orient, camera_translation, betas, left_hand_pose, right_hand_pose], lr=self.step_size, betas=(0.9, 0.999))
         pose_prior_weight, beta_prior_weight = 1.0, 10.0
         
         loss = run_optimization(body_optimizer, 500, pose_prior_weight, beta_prior_weight)
@@ -219,5 +227,7 @@ class SMPLifyX:
             'pose': body_pose,
             'global_orient': global_orient,
             'camera_translation': camera_translation,
-            'betas': betas
+            'betas': betas,
+            'lh_pose': left_hand_pose,
+            'rh_pose': right_hand_pose,
         } if loss.item() < self.threshold else {}
