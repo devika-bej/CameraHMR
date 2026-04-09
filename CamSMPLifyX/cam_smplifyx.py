@@ -9,6 +9,7 @@ from pathlib import Path
 from constants import (
     SMPLX_MODEL_DIR,
     NUM_BETAS_SMPLX,
+    SMPLX2SMPL,
     DOWNSAMPLE_MAT,
     LOSS_CUT,
     LOW_THRESHOLD,
@@ -89,6 +90,10 @@ class SMPLifyX:
         self.vis = vis
         self.save_path = save_path
         self.downsample_mat = pickle.load(open(DOWNSAMPLE_MAT, "rb")).to_dense().cuda()
+        self.smplx2smpl = pickle.load(open(SMPLX2SMPL, "rb"))
+        self.smplx2smpl = torch.tensor(
+            self.smplx2smpl["matrix"][None], dtype=torch.float32
+        ).repeat(1, 1, 1).cuda()
 
     def visualize_result(
         self,
@@ -263,6 +268,7 @@ class SMPLifyX:
                     rh_pose=rh_pose,
                 )
                 model_joints, model_verts = smpl_output.joints, smpl_output.vertices
+                model_verts = self.smplx2smpl.matmul(model_verts)
                 model_verts_sampled = self.downsample_mat.matmul(model_verts)
 
                 loss, _ = body_fitting_loss_dense(
@@ -404,13 +410,12 @@ class SMPLifyX:
             )
         )
 
-        return (
-            {
+        return {
                 "pose": body_pose,
                 "global_orient": global_orient,
                 "camera_translation": camera_translation,
                 "betas": betas,
+                "lh_pose": lh_pose,
+                "rh_pose": rh_pose
             }
-            if loss.item() < self.threshold
-            else {}
-        )
+        

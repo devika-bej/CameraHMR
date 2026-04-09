@@ -82,6 +82,8 @@ def body_fitting_loss_dense(
     reprojection_loss = kp_weight * (joints_conf[:NUM_JOINTS] * reprojection_error.sum(dim=-1)).sum(dim=-1)
     
     # Compute dense reprojection loss
+    
+    print(projected_dense_kp.shape, dense_kp.shape)
     dense_reprojection_error = gmof(projected_dense_kp - dense_kp[:NUM_SURFACE_POINTS, :2], sigma)
     dense_loss = densekp_weight * dense_reprojection_error.sum(dim=[-1, -2])
     
