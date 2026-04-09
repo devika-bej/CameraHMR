@@ -51,8 +51,8 @@ def main(args):
             scale,
             cam_int,
             img_path,
-            dense_kp,
-            i,
+            dense_kp=dense_kp,
+            ind=i,
         )
 
         if result:
@@ -66,21 +66,19 @@ def main(args):
                 result["camera_translation"].detach().cpu().numpy()
             )
             processed_data["shape"].append(result["betas"][0].detach().cpu().numpy())
-
-            body_pose = (
-                torch.hstack([result["global_orient"], result["pose"]])
-                .detach()
-                .cpu()
-                .numpy()[0]
-            )
             processed_data["left_hand_pose"].append(
                 result["lh_pose"][0].detach().cpu().numpy()
             )
             processed_data["right_hand_pose"].append(
                 result["rh_pose"][0].detach().cpu().numpy()
             )
-            processed_data["pose"].append(body_pose)
-
+            processed_data["body_pose"].append(
+                result["pose"][0].detach().cpu().numpy()
+            )
+            processed_data["global_orient"].append(
+                result["global_orient"][0].detach().cpu().numpy()
+            )
+            
     # Save results
     np.savez(output_file_path, **processed_data)
     print(f"Processed data saved to {output_file_path}")

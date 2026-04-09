@@ -210,6 +210,7 @@ class SMPLifyX:
         )
         model_joints_init = smpl_output.joints.detach()
         model_verts_init = smpl_output.vertices.detach()
+        model_verts_init = self.smplx2smpl.matmul(model_verts_init)
 
         dense_kp = torch.tensor(dense_kp, device=self.device, dtype=torch.float32)
         dense_kp = (dense_kp + 0.5) * IMG_RES
@@ -270,7 +271,7 @@ class SMPLifyX:
                 model_joints, model_verts = smpl_output.joints, smpl_output.vertices
                 model_verts = self.smplx2smpl.matmul(model_verts)
                 model_verts_sampled = self.downsample_mat.matmul(model_verts)
-
+                
                 loss, _ = body_fitting_loss_dense(
                     init_pose_,
                     init_global_orient_,
@@ -321,6 +322,8 @@ class SMPLifyX:
             return loss
 
         # Phase 1 Optimization
+        
+        print("optimizing camera translation and shape parameters")
 
         prev_loss = float("inf")
         camera_translation.requires_grad = True
@@ -346,8 +349,12 @@ class SMPLifyX:
             smpl_output.joints.detach(),
             smpl_output.vertices.detach(),
         )
+        model_verts_init = self.smplx2smpl.matmul(model_verts_init)
 
         # Phase 2 Optimization
+        
+        print("optimizing global orientation, camera translation and shape parameters")
+        
         global_orient.requires_grad = True
         camera_translation.requires_grad = True
         betas.requires_grad = True
@@ -374,8 +381,12 @@ class SMPLifyX:
             smpl_output.joints.detach(),
             smpl_output.vertices.detach(),
         )
+        model_verts_init = self.smplx2smpl.matmul(model_verts_init)
 
         # Phase 3 Optimization
+        
+        print("optimizing body pose, global orientation, camera translation and shape parameters")
+        
         init_global_orient_ = global_orient.detach().clone()
         init_betas_ = betas.detach().clone()
         body_pose.requires_grad = True
@@ -389,8 +400,24 @@ class SMPLifyX:
         loss = run_optimization(
             body_optimizer, 500, pose_prior_weight, beta_prior_weight
         )
+        
+        smpl_output = self.smpl(
+            global_orient=global_orient,
+            body_pose=body_pose,
+            betas=betas,
+            lh_pose=lh_pose,
+            rh_pose=rh_pose,
+        )
+        model_joints_init, model_verts_init = (
+            smpl_output.joints.detach(),
+            smpl_output.vertices.detach(),
+        )
+        model_verts_init = self.smplx2smpl.matmul(model_verts_init)
 
         # Phase 4 Optimization
+        
+        print("optimizing body pose, global orientation, camera translation, shape parameters and hand pose")
+        
         lh_pose.requires_grad = True
         rh_pose.requires_grad = True
         body_optimizer = torch.optim.Adam(
