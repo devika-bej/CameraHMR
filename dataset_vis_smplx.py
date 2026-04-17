@@ -3,7 +3,7 @@ import argparse
 import cv2
 import torch
 import numpy as np
-from smplx import SMPL
+from smplx import SMPLX
 from core.utils.renderer_pyrd import Renderer
 
 
@@ -21,10 +21,10 @@ def make_parser():
     return parser
 
 
-def load_smpl_model(model_folder, gender="neutral", num_betas=10):
-    return SMPL(
+def load_smpl_model(model_folder, gender="neutral", num_betas=16):
+    return SMPLX(
         model_folder,
-        model_type='smpl',
+        model_type='smplx',
         gender=gender,
         ext='npz',
         num_betas=num_betas,
@@ -36,10 +36,13 @@ def load_data(npz_path, image_folder, ind):
     img_path = os.path.join(image_folder, data['imgname'][ind].replace('aic-train', 'aic-train-vitpose'))
     return {
         "img_path": img_path,
-        "translations": data['trans_cam'][ind],
+        "translations": data['cam_t'][ind],
         "camera_intrinsics": data['cam_int'][ind],
-        "pose": data['pose'][ind],
+        "pose": data['body_pose'][ind],
         "shape": data['shape'][ind],
+        "global_orient": data['global_orient'][ind],
+        "lhand_pose": data['left_hand_pose'][ind],
+        "rhand_pose": data['right_hand_pose'][ind],
     }
 
 
@@ -54,11 +57,10 @@ def render_model(renderer, model_output, img, outdir, file_name_suffix=""):
 
 
 def main():
-
     parser = make_parser()
     args = parser.parse_args()
     # Paths and constants
-    MODEL_FOLDER = 'data/models/SMPL'
+    MODEL_FOLDER = 'data/models/smplx_neutral_head/models_lockedhead/smplx/'
     IMAGE_FOLDER = args.image_folder
     NPZ_PATH = args.npz_path
     OUTPUT_DIR = args.output_folder
@@ -83,13 +85,18 @@ def main():
     camera_intrinsics = data["camera_intrinsics"]
     pose = data["pose"]
     shape = data["shape"]
+    global_orient = data["global_orient"]
+    lhand_pose = data["lhand_pose"]
+    rhand_pose = data["rhand_pose"]
 
     # Run SMPL model
     model_output = smpl_neutral(
         betas=torch.tensor(shape).unsqueeze(0).float(),
-        global_orient=torch.tensor(pose[:3]).unsqueeze(0).float(),
-        body_pose=torch.tensor(pose[3:]).unsqueeze(0).float(),
+        global_orient=torch.tensor(global_orient).unsqueeze(0).float(),
+        body_pose=torch.tensor(pose).unsqueeze(0).float(),
         transl=torch.tensor(translations).unsqueeze(0),
+        left_hand_pose=torch.tensor(lhand_pose).unsqueeze(0).float(),
+        right_hand_pose=torch.tensor(rhand_pose).unsqueeze(0).float(),
     )
 
     # Initialize renderer
