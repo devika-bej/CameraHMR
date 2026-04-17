@@ -64,8 +64,6 @@ def body_fitting_loss_dense(
     kp_weight=0.005,
     imgname=None, 
     verbose=False,
-    left_hand_pose=None,
-    right_hand_pose=None,
 ):
     """
     Loss function for body fitting.
@@ -93,15 +91,10 @@ def body_fitting_loss_dense(
     pose_loss = 10 * ((body_pose[0] - init_pose[0])**2).sum(dim=[-1, -2])
     beta_loss = beta_prior_weight * ((init_betas - betas)**2).sum(dim=-1)
     
-    # Hand pose loss
-    lh_pose_loss = 10 * ((left_hand_pose[0])**2).sum(dim=[-1, -2]) if left_hand_pose is not None else 0
-    rh_pose_loss = 10 * ((right_hand_pose[0])**2).sum(dim=[-1, -2]) if right_hand_pose is not None else 0
-    
     # Total loss computation
     total_loss = (
         reprojection_loss + beta_loss + 
-        pose_loss + verts_init_loss + dense_loss +
-        lh_pose_loss + rh_pose_loss
+        pose_loss + verts_init_loss + dense_loss
     )
     
     # Dictionary of losses
@@ -112,8 +105,6 @@ def body_fitting_loss_dense(
         'dense': dense_loss,
         'pose_prior': pose_loss,
         'shape_prior': beta_loss,
-        'lh_pose_loss': lh_pose_loss,
-        'rh_pose_loss': rh_pose_loss,
     }
     
     if verbose:
@@ -121,3 +112,28 @@ def body_fitting_loss_dense(
             print(f"{k}: {v}")
     
     return total_loss, loss_dict
+
+def hand_fitting_loss(
+    init_pose, init_global_orient, init_betas,
+    body_pose, global_orient, betas,
+    model_joints, joints_init,
+    verts_init, model_verts,
+    verts_sampled, camera_t,
+    camera_center, camera_scale,
+    cam_int, joints_2d,
+    joints_conf, dense_kp,
+    sigma=100, 
+    pose_prior_weight=0,
+    beta_prior_weight=0,
+    densekp_weight=0.0005,
+    kp_weight=0.005,
+    imgname=None, 
+    verbose=False,
+    left_hand_pose=None,
+    right_hand_pose=None,
+):
+    # Compute projected joints in full image space
+    joints_2d_full_image = perspective_projection(model_joints[0], camera_t, cam_int)
+    projected_joints = j2d_processing(joints_2d_full_image, camera_center, camera_scale)
+    
+    

@@ -416,12 +416,16 @@ class SMPLifyX:
 
         # Phase 4 Optimization
         
-        print("optimizing body pose, global orientation, camera translation, shape parameters and hand pose")
+        print("optimizing hand pose")
         
+        camera_translation.requires_grad = False
+        betas.requires_grad = False
+        global_orient.requires_grad = False
+        body_pose.requires_grad = False
         lh_pose.requires_grad = True
         rh_pose.requires_grad = True
         body_optimizer = torch.optim.Adam(
-            [body_pose, global_orient, camera_translation, betas, lh_pose, rh_pose],
+            [lh_pose, rh_pose],
             lr=self.step_size,
             betas=(0.9, 0.999),
         )
