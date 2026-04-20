@@ -22,6 +22,8 @@ from losses import body_fitting_loss_dense
 from utils.smplx_openpose import SMPLX_
 from utils.image_utils import crop, read_img, transform
 from utils.renderer_cam import render_image_group
+from utils.vertex_ids import mano_smplx_lhand_vertex_ids, mano_smplx_rhand_vertex_ids
+import mediapipe as mp
 
 IMG_RES = 768
 
@@ -116,38 +118,55 @@ smplx_output = smplx_model(
 )
 print("SMPLX model forward pass completed")
 
-model_joints = smplx_output.joints.detach()
-model_verts = smplx_output.vertices.detach()
+# Get MANO vertices from SMPLX output
+smplx_vertices = smplx_output.vertices.squeeze(0)
+lhand_vertices = smplx_vertices[mano_smplx_lhand_vertex_ids.long()]
+rhand_vertices = smplx_vertices[mano_smplx_rhand_vertex_ids.long()]
 
-dense_kp = torch.tensor(dense_kp, device=device, dtype=torch.float32)
-dense_kp = (dense_kp + 0.5) * IMG_RES
+# Project vertices to 2D
+lhand_2d = perspective_projection(lhand_vertices, cam_t, cam_int)
+rhand_2d = perspective_projection(rhand_vertices, cam_t, cam_int)
 
-image_full = cv2.imread(img_path)
-image_full = image_full[:, :, ::-1]
-img_h, img_w, _ = image_full.shape
+# Load image
+img = cv2.imread(img_path)
+img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-# Project SMPL-X vertices to original image plane
-projected_verts = perspective_projection(model_verts[0], cam_t, cam_int)[:, :2]
-verts_cam = model_verts[0] + (cam_t.squeeze(0) if cam_t.ndim == 2 else cam_t).view(1, 3)
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=True, max_num_hands=2)
+hands_results = hands.process(img)
 
-projected_verts_np = projected_verts.detach().cpu().numpy()
-depth_np = verts_cam[:, 2].detach().cpu().numpy()
+# Draw MANO vertices
+for point in lhand_2d:
+    cv2.circle(img, (int(point[0]), int(point[1])), 3, (0, 255, 0), -1)
+for point in rhand_2d:
+    cv2.circle(img, (int(point[0]), int(point[1])), 3, (0, 0, 255), -1)
 
-# Keep only vertices in front of camera and inside image bounds
-valid = depth_np > 1e-6
-valid &= projected_verts_np[:, 0] >= 0
-valid &= projected_verts_np[:, 0] < img_w
-valid &= projected_verts_np[:, 1] >= 0
-valid &= projected_verts_np[:, 1] < img_h
+# Draw MediaPipe landmarks
+if hands_results.multi_hand_landmarks:
+    for hand_landmarks, handedness in zip(
+        hands_results.multi_hand_landmarks,
+        hands_results.multi_handedness,
+    ):
+        label = handedness.classification[0].label  # "Left" or "Right"
+        h, w, _ = img.shape
+        if label == 'Right':
+            # Red for right hand
+            for lm in hand_landmarks.landmark:
+                cx, cy = int(lm.x * w), int(lm.y * h)
+                cv2.circle(img, (cx, cy), 3, (255, 0, 0), -1)
+        else: # Left
+            # Yellow for left hand
+            for lm in hand_landmarks.landmark:
+                cx, cy = int(lm.x * w), int(lm.y * h)
+                cv2.circle(img, (cx, cy), 3, (255, 255, 0), -1)
 
-verts_2d = np.round(projected_verts_np[valid]).astype(np.int32)
+# Save and display the image
+output_img_path = "hand_visualization.jpg"
+cv2.imwrite(output_img_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+print(f"Visualization saved to {output_img_path}")
 
-overlay = image_full.copy()
-if len(verts_2d) > 0:
-    overlay[verts_2d[:, 1], verts_2d[:, 0]] = np.array([255, 0, 0], dtype=np.uint8)
-
-vis_image = cv2.addWeighted(image_full, 0.65, overlay, 0.35, 0)
-
-output_path = os.path.splitext(npz_file)[0] + "_projected_vertices.png"
-cv2.imwrite(output_path, vis_image[:, :, ::-1])
-print(f"Projected vertex visualization saved to: {output_path}")
+# To display the image in a window (optional, might not work in all environments)
+# cv2.imshow("Hand Visualization", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+# cv2.waitKey(0)
+# cv2.destroyAllWindows()
