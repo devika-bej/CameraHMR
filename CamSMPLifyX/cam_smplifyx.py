@@ -302,9 +302,12 @@ class SMPLifyX:
 
                 if mediapipe_keypoints is not None:
                     # Add MediaPipe hand keypoint loss
+from utils.vertex_ids import smplx_lr_hand_inds
+# ...
                     # Project SMPLX hand joints
-                    lhand_joints = smpl_output.left_hand_pose.squeeze(0)[:, :3]
-                    rhand_joints = smpl_output.right_hand_pose.squeeze(0)[:, :3]
+                    smplx_joints = smpl_output.joints.squeeze(0)
+                    lhand_joints = smplx_joints[smplx_lr_hand_inds[:21]]
+                    rhand_joints = smplx_joints[smplx_lr_hand_inds[21:]]
                     
                     lhand_joints_2d = perspective_projection(lhand_joints, camera_translation, cam_int)
                     rhand_joints_2d = perspective_projection(rhand_joints, camera_translation, cam_int)
