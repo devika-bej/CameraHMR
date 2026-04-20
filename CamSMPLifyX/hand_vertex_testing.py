@@ -60,9 +60,10 @@ def j2d_processing(kp, center, scale):
 
 
 def perspective_projection(points, translation, cam_intrinsics):
-
     K = cam_intrinsics
-    points_translated = points + translation.unsqueeze(0)
+    if translation.ndim == 2:
+        translation = translation.squeeze(0)
+    points_translated = points + translation.view(1, 3)
     projected_points = points_translated / points_translated[:, -1].unsqueeze(-1)
     projected_points = torch.einsum("ij,kj->ki", K, projected_points.float())
     return projected_points
@@ -125,24 +126,28 @@ image_full = cv2.imread(img_path)
 image_full = image_full[:, :, ::-1]
 img_h, img_w, _ = image_full.shape
 
-vertices3d = smplx_output.vertices
-img_h, img_w, _ = image_full.shape
+# Project SMPL-X vertices to original image plane
+projected_verts = perspective_projection(model_verts[0], cam_t, cam_int)[:, :2]
+verts_cam = model_verts[0] + (cam_t.squeeze(0) if cam_t.ndim == 2 else cam_t).view(1, 3)
 
-bbox_center = center
-bbox_scale = scale
+projected_verts_np = projected_verts.detach().cpu().numpy()
+depth_np = verts_cam[:, 2].detach().cpu().numpy()
 
-focal_length = cam_int[0, 0].item()
+# Keep only vertices in front of camera and inside image bounds
+valid = depth_np > 1e-6
+valid &= projected_verts_np[:, 0] >= 0
+valid &= projected_verts_np[:, 0] < img_w
+valid &= projected_verts_np[:, 1] >= 0
+valid &= projected_verts_np[:, 1] < img_h
 
-print(image_full.shape, bbox_center, bbox_scale)
-render_img = crop(image_full, bbox_center, bbox_scale, [IMG_RES, IMG_RES])
-# render_img = image_full.copy()
-# h = 200 * bbox_scale[0].item()
-# x1 = int(bbox_center[0].item() - h / 2)
-# y1 = int(bbox_center[1].item() - h / 2)
-# x2 = int(x1 + h)
-# y2 = int(y1 + h)
-# cv2.rectangle(render_img, (x1, y1), (x2, y2), (255, 255, 255), 2)
-print(render_img.shape)
+verts_2d = np.round(projected_verts_np[valid]).astype(np.int32)
 
-# cv2.imwrite("hand_fitting_result.png", image_full[:, :, ::-1])
-cv2.imwrite("hand_fitting_result.png", render_img[:, :, ::-1])
+overlay = image_full.copy()
+if len(verts_2d) > 0:
+    overlay[verts_2d[:, 1], verts_2d[:, 0]] = np.array([255, 0, 0], dtype=np.uint8)
+
+vis_image = cv2.addWeighted(image_full, 0.65, overlay, 0.35, 0)
+
+output_path = os.path.splitext(npz_file)[0] + "_projected_vertices.png"
+cv2.imwrite(output_path, vis_image[:, :, ::-1])
+print(f"Projected vertex visualization saved to: {output_path}")
