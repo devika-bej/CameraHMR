@@ -59,7 +59,9 @@ def j2d_processing(kp, center, scale):
 def perspective_projection(points, translation, cam_intrinsics):
 
     K = cam_intrinsics
-    points_translated = points + translation.unsqueeze(0)
+    if translation.ndim == 2:
+        translation = translation.squeeze(0)
+    points_translated = points + translation.view(1, 3)
     projected_points = points_translated / points_translated[:, -1].unsqueeze(-1)
     projected_points = torch.einsum("ij,kj->ki", K, projected_points.float())
     return projected_points
@@ -146,6 +148,7 @@ class SMPLifyX:
         imgname,
         joints_2d_=None,
         dense_kp=None,
+        mediapipe_keypoints=None,
         ind=-1,
     ):
         body_pose = torch.tensor(
@@ -296,6 +299,26 @@ class SMPLifyX:
                     pose_prior_weight=pose_prior_weight,
                     beta_prior_weight=beta_prior_weight,
                 )
+
+                if mediapipe_keypoints is not None:
+                    # Add MediaPipe hand keypoint loss
+                    # Project SMPLX hand joints
+                    lhand_joints = smpl_output.left_hand_joints.squeeze(0)
+                    rhand_joints = smpl_output.right_hand_joints.squeeze(0)
+                    
+                    lhand_joints_2d = perspective_projection(lhand_joints, camera_translation, cam_int)
+                    rhand_joints_2d = perspective_projection(rhand_joints, camera_translation, cam_int)
+
+                    # Assuming mediapipe_keypoints is a dictionary with 'left' and 'right' keys
+                    # Each key contains a tensor of shape (21, 2) with (x, y) coordinates
+                    if 'left' in mediapipe_keypoints and mediapipe_keypoints['left'] is not None:
+                        mp_lhand_kp = mediapipe_keypoints['left'].to(self.device)
+                        loss += torch.nn.functional.l1_loss(lhand_joints_2d[:, :2], mp_lhand_kp)
+                    
+                    if 'right' in mediapipe_keypoints and mediapipe_keypoints['right'] is not None:
+                        mp_rhand_kp = mediapipe_keypoints['right'].to(self.device)
+                        loss += torch.nn.functional.l1_loss(rhand_joints_2d[:, :2], mp_rhand_kp)
+
 
                 if prev_loss == float("inf"):
                     # Note that these threshold are manually chosen after going through many samples.
@@ -449,4 +472,4 @@ class SMPLifyX:
                 "lh_pose": lh_pose,
                 "rh_pose": rh_pose
             }
-        
+
