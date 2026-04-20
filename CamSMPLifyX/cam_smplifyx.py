@@ -309,15 +309,23 @@ class SMPLifyX:
                     lhand_joints_2d = perspective_projection(lhand_joints, camera_translation, cam_int)
                     rhand_joints_2d = perspective_projection(rhand_joints, camera_translation, cam_int)
 
+                    # Select key MediaPipe landmarks: wrist (0) and finger tips (4, 8, 12, 16, 20)
+                    # These correspond roughly to the first 6 SMPLX hand joints (wrist + 5 finger bases/tips)
+                    mp_key_landmark_indices = [0, 4, 8, 12, 16, 20]
+                    
                     # Assuming mediapipe_keypoints is a dictionary with 'left' and 'right' keys
                     # Each key contains a tensor of shape (21, 2) with (x, y) coordinates
                     if 'left' in mediapipe_keypoints and mediapipe_keypoints['left'] is not None:
                         mp_lhand_kp = mediapipe_keypoints['left'].to(self.device)
-                        loss += torch.nn.functional.l1_loss(lhand_joints_2d[:, :2], mp_lhand_kp)
+                        mp_lhand_key_kp = mp_lhand_kp[mp_key_landmark_indices]  # Select key landmarks
+                        smplx_lhand_key_joints = lhand_joints_2d[:6, :2]  # First 6 SMPLX hand joints
+                        loss += torch.nn.functional.l1_loss(smplx_lhand_key_joints, mp_lhand_key_kp)
                     
                     if 'right' in mediapipe_keypoints and mediapipe_keypoints['right'] is not None:
                         mp_rhand_kp = mediapipe_keypoints['right'].to(self.device)
-                        loss += torch.nn.functional.l1_loss(rhand_joints_2d[:, :2], mp_rhand_kp)
+                        mp_rhand_key_kp = mp_rhand_kp[mp_key_landmark_indices]  # Select key landmarks
+                        smplx_rhand_key_joints = rhand_joints_2d[:6, :2]  # First 6 SMPLX hand joints
+                        loss += torch.nn.functional.l1_loss(smplx_rhand_key_joints, mp_rhand_key_kp)
 
 
                 if prev_loss == float("inf"):
