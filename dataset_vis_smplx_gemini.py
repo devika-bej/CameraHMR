@@ -39,7 +39,8 @@ def load_data(npz_path, image_folder, ind):
     if isinstance(img_name_raw, bytes):
         img_name_raw = img_name_raw.decode('utf-8')
         
-    img_path = os.path.join(image_folder, img_name_raw.replace('aic-train', 'aic-train-vitpose'))
+    # img_path = os.path.join(image_folder, img_name_raw.replace('aic-train', 'aic-train-vitpose'))
+    img_path = img_name_raw
     
     return {
         "img_path": img_path,
