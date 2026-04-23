@@ -86,26 +86,34 @@ def main(args):
             )
         
         print("optimizing left hand...")
-        left_hand_pose, left_betas = optimize_hand(
+        left_hand_pose, left_betas, left_transl = optimize_hand(
             np.expand_dims(mediapipe_kp_left, axis=0),
             left_hand_pose.reshape(1, 45),
             betas[:, :10],
             global_orient,
             inp_data["cam_int"][i],
             result["camera_translation"].detach().cpu().numpy(),
+            center,
+            scale,
             MANO_MODEL_LEFT,
-            "left"
+            "left",
+            num_iters=200,
+            lr=0.02
         )
         print("optimizing right hand...")
-        right_hand_pose, right_betas = optimize_hand(
+        right_hand_pose, right_betas, right_transl = optimize_hand(
             np.expand_dims(mediapipe_kp_right, axis=0),
             right_hand_pose.reshape(1, 45),
             betas[:, :10],
             global_orient,
             inp_data["cam_int"][i],
             result["camera_translation"].detach().cpu().numpy(),
+            center,
+            scale,
             MANO_MODEL_RIGHT,
-            "right"
+            "right",
+            num_iters=200,
+            lr=0.02
         )
         
         # processed_data["left_hand_pose"].append(left_hand_pose.detach().cpu().numpy())
