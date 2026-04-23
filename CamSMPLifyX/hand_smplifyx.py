@@ -77,7 +77,7 @@ def optimize_hand(target_mp_keypoints, hand_pose, betas, global_orient, cam_int,
         betas: (1, 10) - Shape parameters (frozen)
         global_orient: (1, 3) - Global orientation (frozen)
         cam_int: (3, 3) - Camera intrinsic matrix
-        cam_t: (3,) or (1, 3) - Camera translation in camera frame
+        cam_t: (3,) or (1, 3) - Camera translation in camera frame (FIXED - from body)
         center: torch.Tensor - Image center for j2d_processing
         scale: torch.Tensor - Image scale for j2d_processing
         model_path: str - Path to MANO model
@@ -96,13 +96,14 @@ def optimize_hand(target_mp_keypoints, hand_pose, betas, global_orient, cam_int,
     if target_mp_keypoints.shape[-1] == 3:
         target_2d = target_mp_keypoints[:, :, :2]
         confidence = target_mp_keypoints[:, :, 2:]
-        # Filter out points with low confidence (e.g., confidence < 0.5)
+        # Filter out points with low confidence
         confidence = (confidence > 0.5).astype(np.float32)
     else:
         target_2d = target_mp_keypoints
         confidence = np.ones((target_mp_keypoints.shape[0], target_mp_keypoints.shape[1], 1))
     
-    print(f"[{side.upper()}] Target 2D shape: {target_2d.shape}, Confidence: {confidence.sum()}/{confidence.size}")
+    num_visible_kps = confidence.sum()
+    print(f"[{side.upper()}] Target 2D shape: {target_2d.shape}, Visible keypoints: {num_visible_kps}/{confidence.size}")
     print(f"[{side.upper()}] Target 2D range: min={target_2d.min():.2f}, max={target_2d.max():.2f}")
     
     # Convert to torch tensors
@@ -115,14 +116,12 @@ def optimize_hand(target_mp_keypoints, hand_pose, betas, global_orient, cam_int,
         cam_int = torch.from_numpy(cam_int).float()
     cam_int_t = cam_int.to(device)
     
+    # FIX 1: Camera translation is FIXED from body, NOT optimized
     if isinstance(cam_t, np.ndarray):
         cam_t = cam_t.reshape(-1)
-    cam_t_init = torch.tensor(cam_t, dtype=torch.float32, device=device)
-    if cam_t_init.shape[0] == 3:
-        cam_t_init = cam_t_init.unsqueeze(0)
-    
-    # Initialize translation optimization parameter
-    transl_opt = torch.tensor(cam_t_init.cpu().numpy(), requires_grad=True, dtype=torch.float32, device=device)
+    cam_t_fixed = torch.tensor(cam_t, dtype=torch.float32, device=device)
+    if cam_t_fixed.shape[0] == 3:
+        cam_t_fixed = cam_t_fixed.unsqueeze(0)
     
     # Target data
     target_2d_t = torch.tensor(target_2d, dtype=torch.float32, device=device)
@@ -140,56 +139,56 @@ def optimize_hand(target_mp_keypoints, hand_pose, betas, global_orient, cam_int,
         scale = torch.tensor(scale, dtype=torch.float32, device=device)
     
     print(f"[{side.upper()}] Camera intrinsics shape: {cam_int_t.shape}")
-    print(f"[{side.upper()}] Initial translation: {cam_t_init.cpu().numpy()}")
+    print(f"[{side.upper()}] Fixed camera translation: {cam_t_fixed.cpu().numpy()}")
     
-    # Optimize hand pose and translation
-    optimizer = torch.optim.Adam([hand_pose_opt, transl_opt], lr=lr)
+    # FIX 2: Only optimize hand pose, NOT translation
+    optimizer = torch.optim.Adam([hand_pose_opt], lr=lr)
     
-    # Loss weights
-    kp_weight = 0.01          # 2D keypoint reprojection loss
-    pose_prior_weight = 0.1   # Hand pose prior (encourage natural poses)
-    transl_weight = 0.001     # Translation regularization (mild constraint)
+    # FIX 3: Better loss weight balance
+    kp_weight = 5.0               # 2D keypoint reprojection (INCREASED - prioritize keypoint matching)
+    pose_prior_weight = 0.001     # Hand pose prior (DECREASED - allow fingers to move)
     
-    cam_t_init_detached = cam_t_init.detach()
-    sigma = 100               # GMOF sigma for robust estimation
+    sigma = 100                   # GMOF sigma for robust estimation
     
     print(f"[{side.upper()}] Starting optimization with {num_iters} iterations...")
+    print(f"[{side.upper()}] Loss weights: KP={kp_weight}, Pose={pose_prior_weight}")
     
     for iteration in range(num_iters):
         optimizer.zero_grad()
         
         # Get 3D hand landmarks in camera space (B, 21, 3)
-        landmarks_3d = mapper(hand_pose_opt, betas_t, global_orient_t, transl_opt)
+        landmarks_3d = mapper(hand_pose_opt, betas_t, global_orient_t, cam_t_fixed)
         
         # Project 3D landmarks to 2D using camera intrinsics
-        # landmarks_3d is (B, 21, 3), we need to extract first element
-        joints_2d_full_image = perspective_projection(landmarks_3d[0], transl_opt.squeeze(0), cam_int_t)
+        joints_2d_full_image = perspective_projection(landmarks_3d[0], cam_t_fixed.squeeze(0), cam_int_t)
         # Apply j2d processing (normalization and transformation)
         projected_keypoints = j2d_processing(joints_2d_full_image, center, scale)
         
         # Keypoint matching loss using robust GMOF
-        # Compute reprojection error using GMOF for robustness
         kp_error = gmof(projected_keypoints - target_2d_t[0], sigma)
         reprojection_loss = kp_weight * (confidence_t[0] * kp_error.sum(dim=-1)).sum()
         
-        # Hand pose prior (L2 regularization on pose parameters)
+        # FIX 4: Weak regularization on pose to allow natural deformation
         pose_loss = pose_prior_weight * torch.mean(hand_pose_opt ** 2)
         
-        # Translation regularization (soft constraint to stay near initialization)
-        transl_loss = transl_weight * torch.mean((transl_opt - cam_t_init_detached) ** 2)
-        
-        # Total loss
-        total_loss = reprojection_loss + pose_loss + transl_loss
+        # Total loss (NO translation loss)
+        total_loss = reprojection_loss + pose_loss
         
         total_loss.backward()
         optimizer.step()
         
-        if iteration % 20 == 0:
-            print(f"[{side.upper()}] Iter {iteration:3d}, Loss: {total_loss.item():.6f} | KP: {reprojection_loss.item():.6f} | Pose: {pose_loss.item():.6f} | Transl: {transl_loss.item():.6f}")
+        if iteration % 20 == 0 or iteration == num_iters - 1:
+            print(f"[{side.upper()}] Iter {iteration:3d}, Loss: {total_loss.item():.6f} | KP: {reprojection_loss.item():.6f} | Pose: {pose_loss.item():.6f}")
         
         if iteration == num_iters - 1:
-            print(f"[{side.upper()}] Final translation: {transl_opt.detach().cpu().numpy()}")
+            # Compute final projected keypoints for debugging
+            with torch.no_grad():
+                landmarks_3d_final = mapper(hand_pose_opt, betas_t, global_orient_t, cam_t_fixed)
+                joints_2d_final = perspective_projection(landmarks_3d_final[0], cam_t_fixed.squeeze(0), cam_int_t)
+                proj_final = j2d_processing(joints_2d_final, center, scale)
+                final_error = torch.mean(torch.abs(proj_final - target_2d_t[0]) * confidence_t[0])
+                print(f"[{side.upper()}] Final mean projected error: {final_error.item():.2f} pixels")
     
     print(f"[{side.upper()}] Optimization complete!")
     
-    return hand_pose_opt.detach(), betas_t.detach(), transl_opt.detach()
+    return hand_pose_opt.detach(), betas_t.detach()
