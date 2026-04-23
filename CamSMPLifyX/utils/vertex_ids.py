@@ -163,6 +163,13 @@ mano_smplx_lhand_vertex_ids = torch.tensor([
     5376, 5377, 5379, 5378, 5380, 5381, 5382, 5385, 5383, 5384, 5386,
     5387, 5388, 5389, 5390, 5391, 5392, 5393, 5394]).long()
 
+target_values = torch.tensor([5361, 4933, 5058, 5169, 5286], dtype=torch.long)
+indices = [
+    (mano_smplx_lhand_vertex_ids == v).nonzero(as_tuple=True)[0].item()
+    for v in target_values
+]
+print(indices)
+
 
 mano_smplx_rhand_vertex_ids = torch.tensor([
     7333, 7334, 7331, 7332, 7338, 7335, 7336, 7337, 7340, 7339, 7342,
@@ -236,6 +243,14 @@ mano_smplx_rhand_vertex_ids = torch.tensor([
     8098, 8100, 8101, 8103, 8102, 8104, 8105, 8106, 8107, 8108, 8109,
     8110, 8111, 8113, 8112, 8114, 8115, 8116, 8119, 8117, 8118, 8120,
     8121, 8122, 8123, 8124, 8125, 8126, 8127, 8128]).long()
+
+
+target_values = torch.tensor([8079, 7669, 7794, 7905, 8022], dtype=torch.long)
+indices = [
+    (mano_smplx_rhand_vertex_ids == v).nonzero(as_tuple=True)[0].item()
+    for v in target_values
+]
+print(indices)
 
 mano_smplh_lhand_vertex_ids = torch.tensor([
         1981, 1982, 1983, 1984, 1985, 1986, 1987, 1988, 1989, 1990, 1991, 1992,

@@ -416,24 +416,24 @@ class SMPLifyX:
 
         # Phase 4 Optimization
         
-        print("optimizing hand pose")
+        # print("optimizing hand pose")
         
-        camera_translation.requires_grad = False
-        betas.requires_grad = False
-        global_orient.requires_grad = False
-        body_pose.requires_grad = False
-        lh_pose.requires_grad = True
-        rh_pose.requires_grad = True
-        body_optimizer = torch.optim.Adam(
-            [lh_pose, rh_pose],
-            lr=self.step_size,
-            betas=(0.9, 0.999),
-        )
-        pose_prior_weight, beta_prior_weight = 1.0, 10.0
+        # camera_translation.requires_grad = False
+        # betas.requires_grad = False
+        # global_orient.requires_grad = False
+        # body_pose.requires_grad = False
+        # lh_pose.requires_grad = True
+        # rh_pose.requires_grad = True
+        # body_optimizer = torch.optim.Adam(
+        #     [lh_pose, rh_pose],
+        #     lr=self.step_size,
+        #     betas=(0.9, 0.999),
+        # )
+        # pose_prior_weight, beta_prior_weight = 1.0, 10.0
 
-        loss = run_optimization(
-            body_optimizer, 500, pose_prior_weight, beta_prior_weight
-        )
+        # loss = run_optimization(
+        #     body_optimizer, 500, pose_prior_weight, beta_prior_weight
+        # )
 
         print(
             "Final loss {:.4f}, Threshold cut {:.4f}".format(

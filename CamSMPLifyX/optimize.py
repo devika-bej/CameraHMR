@@ -3,6 +3,10 @@ import argparse
 import numpy as np
 import torch
 from cam_smplifyx import SMPLifyX
+from hand_smplifyx import optimize_hand
+from constants import MANO_MODEL_LEFT, MANO_MODEL_RIGHT
+
+CUDA_LAUNCH_BLOCKING=1
 
 
 def main(args):
@@ -37,6 +41,8 @@ def main(args):
         center = torch.tensor(inp_data["center"][i])
         scale = torch.tensor(inp_data["scale"][i] / 200.0)
         dense_kp = inp_data["dense_kp"][i]
+        mediapipe_kp_left = inp_data["mediapipe_kp_left"][i]
+        mediapipe_kp_right = inp_data["mediapipe_kp_right"][i]
 
         # Run SMPLify optimization
         result = smplifyx(
@@ -78,6 +84,31 @@ def main(args):
             processed_data["global_orient"].append(
                 result["global_orient"][0].detach().cpu().numpy()
             )
+        
+        print("optimizing left hand...")
+        left_hand_pose, left_betas = optimize_hand(
+            np.expand_dims(mediapipe_kp_left, axis=0),
+            left_hand_pose.reshape(1, 45),
+            betas[:, :10],
+            global_orient,
+            MANO_MODEL_LEFT,
+            "left"
+        )
+        print("optimizing right hand...")
+        right_hand_pose, right_betas = optimize_hand(
+            np.expand_dims(mediapipe_kp_right, axis=0),
+            right_hand_pose.reshape(1, 45),
+            betas[:, :10],
+            global_orient,
+            MANO_MODEL_RIGHT,
+            "right"
+        )
+        
+        # processed_data["left_hand_pose"].append(left_hand_pose.detach().cpu().numpy())
+        # processed_data["right_hand_pose"].append(right_hand_pose.detach().cpu().numpy())
+        
+        processed_data["left_hand_pose"][-1] = left_hand_pose.detach().cpu().numpy()
+        processed_data["right_hand_pose"][-1] = right_hand_pose.detach().cpu().numpy()
             
     # Save results
     np.savez(output_file_path, **processed_data)
