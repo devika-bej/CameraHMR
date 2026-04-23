@@ -91,6 +91,8 @@ def main(args):
             left_hand_pose.reshape(1, 45),
             betas[:, :10],
             global_orient,
+            inp_data["cam_int"][i],
+            result["camera_translation"].detach().cpu().numpy(),
             MANO_MODEL_LEFT,
             "left"
         )
@@ -100,6 +102,8 @@ def main(args):
             right_hand_pose.reshape(1, 45),
             betas[:, :10],
             global_orient,
+            inp_data["cam_int"][i],
+            result["camera_translation"].detach().cpu().numpy(),
             MANO_MODEL_RIGHT,
             "right"
         )
