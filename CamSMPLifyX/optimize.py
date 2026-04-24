@@ -82,7 +82,7 @@ def main(args):
                 result["pose"][0].detach().cpu().numpy()
             )
             processed_data["global_orient"].append(
-                result["global_orient"][0].detach().cpu().numpy()
+                result["global_orient"].detach().cpu().numpy()
             )
         
         print("optimizing left hand...")
@@ -93,12 +93,8 @@ def main(args):
             global_orient,
             inp_data["cam_int"][i],
             result["camera_translation"].detach().cpu().numpy(),
-            center,
-            scale,
             MANO_MODEL_LEFT,
             "left",
-            num_iters=200,
-            lr=0.02
         )
         print("optimizing right hand...")
         right_hand_pose, right_betas = optimize_hand(
@@ -108,19 +104,15 @@ def main(args):
             global_orient,
             inp_data["cam_int"][i],
             result["camera_translation"].detach().cpu().numpy(),
-            center,
-            scale,
             MANO_MODEL_RIGHT,
             "right",
-            num_iters=200,
-            lr=0.02
         )
         
         # processed_data["left_hand_pose"].append(left_hand_pose.detach().cpu().numpy())
         # processed_data["right_hand_pose"].append(right_hand_pose.detach().cpu().numpy())
         
-        processed_data["left_hand_pose"][-1] = left_hand_pose.detach().cpu().numpy()
-        processed_data["right_hand_pose"][-1] = right_hand_pose.detach().cpu().numpy()
+        processed_data["left_hand_pose"][-1] = left_hand_pose.reshape(15, 3).detach().cpu().numpy()
+        processed_data["right_hand_pose"][-1] = right_hand_pose.reshape(15, 3).detach().cpu().numpy()
             
     # Save results
     np.savez(output_file_path, **processed_data)
