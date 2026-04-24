@@ -55,7 +55,7 @@ def visualize_npz_standard(image_folder, npz_path, output_folder, model_type='sm
     # 3. Process each image and render
     print(f"Starting visualization for {num_images} images...")
     for i in tqdm(range(num_images)):
-        img_name = imgnames[i]
+        img_name = os.path.basename(imgnames[i])
         img_path = os.path.join(image_folder, img_name)
         
         img_cv2 = cv2.imread(img_path)
@@ -114,6 +114,7 @@ def visualize_npz_standard(image_folder, npz_path, output_folder, model_type='sm
         overlay_fname = os.path.join(output_folder, f'{fname}_npz_overlay{img_ext}')
         front_view_safe = np.clip(front_view, 0, 255).astype(np.uint8)
         cv2.imwrite(overlay_fname, cv2.cvtColor(front_view_safe, cv2.COLOR_RGB2BGR))
+        print("imwriting to ", overlay_fname)
 
     print(f"Done! Visualizations saved to {output_folder}")
 
