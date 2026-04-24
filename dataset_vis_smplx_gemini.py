@@ -1,86 +1,100 @@
 import os
 import cv2
 import torch
-import smplx
+import smplx  # Official library
+import sys
 import numpy as np
-import argparse
 from tqdm import tqdm
+from scipy.spatial.transform import Rotation as R
 
-# Import components from your existing repository structure
+# Import renderer from your project structure
 from core.utils.renderer_pyrd import Renderer
-from core.constants import SMPL_MODEL_PATH, SMPLX_MODEL_DIR, NUM_BETAS, NUM_BETAS_SMPLX
+from core.constants import SMPLX_MODEL_DIR, SMPL_MODEL_PATH # Import your paths
 
-def visualize_npz(npz_path, image_folder, output_folder):
+def aa_to_rotmat(axis_angle):
+    """
+    Helper function to convert axis-angle vectors to 3x3 rotation matrices.
+    Input: numpy array of shape (..., 3)
+    Output: numpy array of shape (..., 3, 3)
+    """
+    original_shape = axis_angle.shape
+    # Flatten to a list of 3D vectors
+    flat_aa = axis_angle.reshape(-1, 3)
+    # Convert to rotation matrices
+    rot_mats = R.from_rotvec(flat_aa).as_matrix()
+    # Reshape back to original dimensions + (3, 3)
+    return rot_mats.reshape(original_shape[:-1] + (3, 3))
+
+def visualize_npz_standard(image_folder, npz_path, output_folder, model_type='smplx'):
     os.makedirs(output_folder, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # 1. Load the NPZ data
     print(f"Loading data from {npz_path}...")
     data = np.load(npz_path)
-    num_samples = len(data['imgname'])
+    imgnames = data['imgname']
+    num_images = len(imgnames)
+    num_betas = data['shape'].shape[1]
 
-    # Determine model type based on the keys present in the NPZ output
-    is_smplx = 'left_hand_pose' in data.keys()
-    
-    print(f"Detected model type: {'SMPL-X' if is_smplx else 'SMPL'}")
-
-    # Initialize the body model
-    if is_smplx:
+    # 2. Initialize the Official SMPL-X/SMPL Layer
+    print("Initializing official SMPL/SMPL-X Layer...")
+    if model_type == 'smplx':
         body_model = smplx.SMPLXLayer(
             model_path=SMPLX_MODEL_DIR, 
-            num_betas=NUM_BETAS_SMPLX
+            num_betas=num_betas,
+            use_pca=False # Tell it we are providing full hand poses, not PCA
         ).to(device)
     else:
         body_model = smplx.SMPLLayer(
             model_path=SMPL_MODEL_PATH, 
-            num_betas=NUM_BETAS
+            num_betas=num_betas
         ).to(device)
+        
+    body_model.eval()
 
-    for i in tqdm(range(num_samples), desc="Rendering images"):
-        img_name = data['imgname'][i]
+    # 3. Process each image and render
+    print(f"Starting visualization for {num_images} images...")
+    for i in tqdm(range(num_images)):
+        img_name = imgnames[i]
         img_path = os.path.join(image_folder, img_name)
-
-        if not os.path.exists(img_path):
-            print(f"Warning: {img_path} not found in {image_folder}. Skipping.")
-            continue
-
-        # Load and prep the background image
+        
         img_cv2 = cv2.imread(img_path)
+        if img_cv2 is None:
+            print(f"Warning: Could not read {img_path}. Skipping.")
+            continue
+            
         img_cv2 = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB)
         img_h, img_w, _ = img_cv2.shape
 
-        # Prepare SMPL parameters
-        # We reshape them to (1, -1) to ensure compatibility with smplx expectations for batched inputs
-        params = {
-            # Note: The network output key was 'betas', but it was saved as 'shape' in the NPZ.
-            'betas': torch.tensor(data['shape'][i]).view(1, -1).float().to(device)
-        }
-
-        if is_smplx:
-            params['global_orient'] = torch.tensor(data['global_orient'][i]).view(1, -1).float().to(device)
-            params['body_pose'] = torch.tensor(data['body_pose'][i]).view(1, -1).float().to(device)
-            params['left_hand_pose'] = torch.tensor(data['left_hand_pose'][i]).view(1, -1).float().to(device)
-            params['right_hand_pose'] = torch.tensor(data['right_hand_pose'][i]).view(1, -1).float().to(device)
-        else:
-            # If standard SMPL, split the (24, 3) pose array into global_orient (1, 3) and body_pose (23, 3)
-            pose = data['pose'][i] 
-            params['global_orient'] = torch.tensor(pose[0:1]).view(1, -1).float().to(device)
-            params['body_pose'] = torch.tensor(pose[1:]).view(1, -1).float().to(device)
-
-        # Reconstruct the mesh
-        with torch.no_grad():
-            smpl_output = body_model(**params)
-            # Extract the first (and only) mesh in the batch
-            vertices = smpl_output.vertices[0] 
-
-        # Apply the computed camera translation to the vertices
-        cam_t = torch.tensor(data['cam_t'][i]).float().to(device)
-        pred_vertices_array = (vertices + cam_t).cpu().numpy()
-
-        # Get focal length from the saved intrinsics matrix
+        # Retrieve Camera Info
+        cam_t = torch.tensor(data['cam_t'][i:i+1]).to(device)
         cam_int = data['cam_int'][i]
-        focal_length = cam_int[0, 0]
+        focal_length = float(cam_int[0, 0])
 
-        # Initialize renderer and generate overlay
+        kwargs = {}
+        if model_type == 'smplx':
+            # Extract axis-angles, convert to rot matrices via scipy, and convert to torch tensors
+            # Resulting shapes will be (1, J, 3, 3) which is exactly what SMPLXLayer wants
+            kwargs['global_orient'] = torch.tensor(aa_to_rotmat(data['global_orient'][i:i+1])).float().to(device)
+            kwargs['body_pose'] = torch.tensor(aa_to_rotmat(data['body_pose'][i:i+1])).float().to(device)
+            kwargs['left_hand_pose'] = torch.tensor(aa_to_rotmat(data['left_hand_pose'][i:i+1])).float().to(device)
+            kwargs['right_hand_pose'] = torch.tensor(aa_to_rotmat(data['right_hand_pose'][i:i+1])).float().to(device)
+            kwargs['betas'] = torch.tensor(data['shape'][i:i+1]).float().to(device)
+        else:
+            pose = data['pose'][i:i+1] # Contains global_orient + body_pose
+            kwargs['global_orient'] = torch.tensor(aa_to_rotmat(pose[:, :1, :])).float().to(device)
+            kwargs['body_pose'] = torch.tensor(aa_to_rotmat(pose[:, 1:, :])).float().to(device)
+            kwargs['betas'] = torch.tensor(data['shape'][i:i+1]).float().to(device)
+
+        # 4. Generate Mesh
+        with torch.no_grad():
+            output = body_model(**kwargs)
+            vertices = output.vertices[0]
+
+        # Apply camera translation
+        pred_vertices_array = (vertices + cam_t[0]).cpu().numpy()
+
+        # 5. Render
         renderer = Renderer(
             focal_length=focal_length, 
             img_w=img_w, 
@@ -89,24 +103,30 @@ def visualize_npz(npz_path, image_folder, output_folder):
             same_mesh_color=True
         )
         
-        front_view = renderer.render_front_view(pred_vertices_array, bg_img_rgb=img_cv2.copy())
-
-        # Save the rendered image
-        fname, img_ext = os.path.splitext(img_name)
-        overlay_fname = os.path.join(output_folder, f'{fname}_reconstructed{img_ext}')
-        
-        out_img = cv2.cvtColor(front_view, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(overlay_fname, out_img)
-
-        # Cleanup renderer to free memory
+        front_view = renderer.render_front_view(
+            np.expand_dims(pred_vertices_array, 0), 
+            bg_img_rgb=img_cv2.copy()
+        )
         renderer.delete()
 
+        # 6. Save Image
+        fname, img_ext = os.path.splitext(img_name)
+        overlay_fname = os.path.join(output_folder, f'{fname}_npz_overlay{img_ext}')
+        front_view_safe = np.clip(front_view, 0, 255).astype(np.uint8)
+        cv2.imwrite(overlay_fname, cv2.cvtColor(front_view_safe, cv2.COLOR_RGB2BGR))
+
+    print(f"Done! Visualizations saved to {output_folder}")
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Standalone SMPL/SMPL-X NPZ Visualizer")
-    parser.add_argument("--npz_path", type=str, required=True, help="Path to mesh_estimation_output.npz")
-    parser.add_argument("--image_folder", type=str, required=True, help="Folder containing the original images")
-    parser.add_argument("--output_folder", type=str, required=True, help="Folder to save the rendered outputs")
+    # Example usage:
+    # Set these to your respective paths
+    IMAGE_DIR = sys.argv[1]
+    NPZ_FILE = sys.argv[2]
+    OUTPUT_DIR = sys.argv[3]
     
-    args = parser.parse_args()
-    
-    visualize_npz(args.npz_path, args.image_folder, args.output_folder)
+    visualize_npz_standard(
+        image_folder=IMAGE_DIR, 
+        npz_path=NPZ_FILE, 
+        output_folder=OUTPUT_DIR, 
+        model_type='smplx'
+    )
