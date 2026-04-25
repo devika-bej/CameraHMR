@@ -54,10 +54,10 @@ class HandOptimizer:
         model = self.models[side]
         
         # Target: (21, 2) pixels
-        target_2d = target_mp[:, :2].unsqueeze(0).to(self.device) 
+        target_2d = target_mp[:, :, :2].to(self.device) 
         
         # Optimize Wrist (Index 0) + Fingers (Index 1-15)
-        hand_full_pose = init_pose.clone().detach().requires_grad_(True)
+        hand_full_pose = init_pose.clone().reshape(1, -1).detach().requires_grad_(True)
         shape = init_shape.clone().detach().requires_grad_(True)
         
         optimizer = torch.optim.Adam([hand_full_pose, shape], lr=0.01)
@@ -66,11 +66,11 @@ class HandOptimizer:
             optimizer.zero_grad()
             
             # Forward pass: full_pose (1, 16, 3) -> 1 wrist + 15 fingers
-            hand_pose = hand_full_pose[:, 1:]  # Fingers
-            hand_pose = hand_pose.reshape(1, 15*3)  # Flatten fingers
-            global_orient = hand_full_pose[:, :1]  # Wrist
-            global_orient = global_orient.reshape(1, 3)  # Flatten wrist
-            output = model(hand_pose=hand_pose, global_orient=global_orient, betas=shape)
+            # hand_pose = hand_full_pose[:, 1:]  # Fingers
+            # hand_pose = hand_pose.reshape(1, 15*3)  # Flatten fingers
+            # global_orient = hand_full_pose[:, :1]  # Wrist
+            # global_orient = global_orient.reshape(1, 3)  # Flatten wrist
+            output = model(hand_pose=hand_full_pose[:, 3:], global_orient=hand_full_pose[:, :3], betas=shape)
             landmarks_3d = self.get_mano_landmarks(output)
             
             # Project to pixel space
@@ -80,7 +80,7 @@ class HandOptimizer:
             loss_2d = torch.mean((landmarks_2d - target_2d)**2)
             
             # Regularization: Keep pose close to initial estimate
-            loss_reg = torch.mean((hand_full_pose - init_pose)**2) * 0.1
+            loss_reg = torch.mean((hand_full_pose - init_pose.reshape(1, -1))**2) * 0.1
             
             total_loss = loss_2d + loss_reg
             total_loss.backward()
