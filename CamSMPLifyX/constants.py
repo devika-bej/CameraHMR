@@ -9,6 +9,7 @@ NUM_BETAS_SMPLX = 16
 SMPLX_MODEL_DIR = "data/models/smplx_neutral_head/models_lockedhead/smplx"
 MANO_MODEL_LEFT = "data/models/mano/MANO_LEFT.pkl"
 MANO_MODEL_RIGHT = "data/models/mano/MANO_RIGHT.pkl"
+ALL_MODEL_DIR = "data/models/"
 # Mean and standard deviation for normalizing input image
 IMG_NORM_MEAN = [0.485, 0.456, 0.406]
 IMG_NORM_STD = [0.229, 0.224, 0.225]

@@ -3,8 +3,8 @@ import argparse
 import numpy as np
 import torch
 from cam_smplifyx import SMPLifyX
-from hand_smplifyx import optimize_hand
-from constants import MANO_MODEL_LEFT, MANO_MODEL_RIGHT
+from constants import ALL_MODEL_DIR
+from hand_smplifyx import HandOptimizer
 
 CUDA_LAUNCH_BLOCKING=1
 
@@ -18,6 +18,7 @@ def main(args):
     output_file_path = os.path.join(args.output_dir, "output.npz")
 
     smplifyx = SMPLifyX(vis=args.vis, verbose=args.verbose)
+    hand_refiner = HandOptimizer(model_path=ALL_MODEL_DIR)
     inp_data = np.load(init_param_file, allow_pickle=True)
 
     processed_data = {key: [] for key in inp_data}
@@ -85,34 +86,48 @@ def main(args):
                 result["global_orient"].detach().cpu().numpy()
             )
         
-        print("optimizing left hand...")
-        left_hand_pose, left_betas = optimize_hand(
-            np.expand_dims(mediapipe_kp_left, axis=0),
-            left_hand_pose.reshape(1, 45),
-            betas[:, :10],
-            global_orient,
-            inp_data["cam_int"][i],
-            result["camera_translation"].detach().cpu().numpy(),
-            MANO_MODEL_LEFT,
-            "left",
-        )
-        print("optimizing right hand...")
-        right_hand_pose, right_betas = optimize_hand(
-            np.expand_dims(mediapipe_kp_right, axis=0),
-            right_hand_pose.reshape(1, 45),
-            betas[:, :10],
-            global_orient,
-            inp_data["cam_int"][i],
-            result["camera_translation"].detach().cpu().numpy(),
-            MANO_MODEL_RIGHT,
-            "right",
-        )
-        
-        # processed_data["left_hand_pose"].append(left_hand_pose.detach().cpu().numpy())
-        # processed_data["right_hand_pose"].append(right_hand_pose.detach().cpu().numpy())
-        
-        processed_data["left_hand_pose"][-1] = left_hand_pose.reshape(15, 3).detach().cpu().numpy()
-        processed_data["right_hand_pose"][-1] = right_hand_pose.reshape(15, 3).detach().cpu().numpy()
+        if result:
+            # --- START HAND REFINEMENT ---
+            device = result["lh_pose"].device
+            # Format camera params for the refiner
+            c_int = cam_int.unsqueeze(0).to(device).float()
+            c_t = result["camera_translation"].to(device).float()
+
+            # Process Left Hand
+            if len(mediapipe_kp_left) > 0:
+                # MediaPipe gives multiple hands; we take the first detection
+                mp_left = torch.tensor(np.expand_dims(mediapipe_kp_left, axis=0)).to(device).float()
+                
+                # Combine Wrist (Joint 20) and LH Pose (15 joints)
+                l_init = torch.cat([result["pose"][:, 20:21, :], result["lh_pose"]], dim=1)
+                
+                refined_l_pose, _ = hand_refiner.refine(
+                    mp_left, l_init, result["betas"][:, :10], c_int, c_t, is_left=True
+                )
+                
+                # Update the main result dictionary
+                result["pose"][:, 20:21, :] = refined_l_pose[:, :1, :] # Update Wrist
+                result["lh_pose"] = refined_l_pose[:, 1:, :]           # Update Fingers
+
+            # Process Right Hand
+            if len(mediapipe_kp_right) > 0:
+                mp_right = torch.tensor(np.expand_dims(mediapipe_kp_right, axis=0)).to(device).float()
+
+                # Combine Wrist (Joint 21) and RH Pose (15 joints)
+                r_init = torch.cat([result["pose"][:, 21:22, :], result["rh_pose"]], dim=1)
+                
+                refined_r_pose, _ = hand_refiner.refine(
+                    mp_right, r_init, result["betas"][:, :10], c_int, c_t, is_left=False
+                )
+                
+                result["pose"][:, 21:22, :] = refined_r_pose[:, :1, :] # Update Wrist
+                result["rh_pose"] = refined_r_pose[:, 1:, :]           # Update Fingers
+            # --- END HAND REFINEMENT ---
+            
+            processed_data["body_pose"][-1] = result["pose"][0].detach().cpu().numpy()
+            processed_data["left_hand_pose"][-1] = result["lh_pose"][0].detach().cpu().numpy()
+            processed_data["right_hand_pose"][-1] = result["rh_pose"][0].detach().cpu().numpy()
+
             
     # Save results
     np.savez(output_file_path, **processed_data)
