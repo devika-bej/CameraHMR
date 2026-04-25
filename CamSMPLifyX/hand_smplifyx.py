@@ -54,7 +54,11 @@ class HandOptimizer:
         model = self.models[side]
         
         # Target: (21, 2) pixels
-        target_2d = target_mp[:, :, :2].to(self.device) 
+        target_2d = target_mp[:, :, :2].detach().to(self.device) 
+        
+        cam_int = cam_int.detach()
+        cam_t = cam_t.detach()
+        init_pose = init_pose.detach()
         
         # Optimize Wrist (Index 0) + Fingers (Index 1-15)
         hand_full_pose = init_pose.clone().reshape(1, -1).detach().requires_grad_(True)

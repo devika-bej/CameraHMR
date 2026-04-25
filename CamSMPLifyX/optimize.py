@@ -100,7 +100,7 @@ def main(args):
                 mp_left = torch.tensor(np.expand_dims(mediapipe_kp_left, axis=0)).to(device).float()
                 
                 # Combine Wrist (Joint 20) and LH Pose (15 joints)
-                l_init = torch.cat([result["pose"][:, 20:21, :], result["lh_pose"]], dim=1)
+                l_init = torch.cat([result["pose"][:, 19:20, :], result["lh_pose"]], dim=1)
                 
                 refined_l_pose, _ = hand_refiner.refine(
                     mp_left, l_init, result["betas"][:, :10], c_int, c_t, is_left=True
@@ -111,7 +111,7 @@ def main(args):
                 
                 # Update the main result dictionary
                 refined_l_pose = refined_l_pose.reshape(1, 16, 3) # Reshape back to (1, 16, 3)
-                result["pose"][:, 20:21, :] = refined_l_pose[:, :1, :] # Update Wrist
+                result["pose"][:, 19:20, :] = refined_l_pose[:, :1, :] # Update Wrist
                 result["lh_pose"] = refined_l_pose[:, 1:, :]           # Update Fingers
 
             # Process Right Hand
@@ -120,7 +120,7 @@ def main(args):
                 mp_right = torch.tensor(np.expand_dims(mediapipe_kp_right, axis=0)).to(device).float()
 
                 # Combine Wrist (Joint 21) and RH Pose (15 joints)
-                r_init = torch.cat([result["pose"][:, 21:22, :], result["rh_pose"]], dim=1)
+                r_init = torch.cat([result["pose"][:, 20:21, :], result["rh_pose"]], dim=1)
                 
                 refined_r_pose, _ = hand_refiner.refine(
                     mp_right, r_init, result["betas"][:, :10], c_int, c_t, is_left=False
@@ -130,7 +130,7 @@ def main(args):
                 result["rh_pose"] = result["rh_pose"].clone() # Clone to avoid in-place modification
                 
                 refined_r_pose = refined_r_pose.reshape(1, 16, 3) # Reshape back to (1, 16, 3)
-                result["pose"][:, 21:22, :] = refined_r_pose[:, :1, :] # Update Wrist
+                result["pose"][:, 20:21, :] = refined_r_pose[:, :1, :] # Update Wrist
                 result["rh_pose"] = refined_r_pose[:, 1:, :]           # Update Fingers
             # --- END HAND REFINEMENT ---
             
