@@ -5,6 +5,7 @@ import torch
 from cam_smplifyx import SMPLifyX
 from constants import ALL_MODEL_DIR
 from hand_smplifyx import HandOptimizer
+from hand_vertex_testing import check_coordinate_alignment
 
 CUDA_LAUNCH_BLOCKING=1
 
@@ -40,7 +41,7 @@ def main(args):
         cam_int = torch.tensor(inp_data["cam_int"][i])
         cam_t = torch.tensor(inp_data["cam_t"][i])
         center = torch.tensor(inp_data["center"][i])
-        scale = torch.tensor(inp_data["scale"][i] / 200.0)
+        scale = torch.tensor(inp_data["scale"][i])
         dense_kp = inp_data["dense_kp"][i]
         mediapipe_kp_left = inp_data["mediapipe_kp_left"][i]
         mediapipe_kp_right = inp_data["mediapipe_kp_right"][i]
@@ -102,8 +103,14 @@ def main(args):
                 # Combine Wrist (Joint 20) and LH Pose (15 joints)
                 l_init = torch.cat([result["pose"][:, 19:20, :], result["lh_pose"]], dim=1)
                 
+                check = check_coordinate_alignment(
+                    hand_refiner, mp_left, l_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=True,
+                    image_path=img_path, # Assuming scale is related to image size
+                    save_overlay=True, overlay_path=f"coord_check_{i}_left.png"
+                )
+                print("Coordinate alignment check completed. Overlay saved as:", f"coord_check_{i}_left.png")
                 refined_l_pose, _ = hand_refiner.refine(
-                    mp_left, l_init, result["betas"][:, :10], c_int, c_t, is_left=True
+                    mp_left, l_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=True
                 )
                 
                 result["pose"] = result["pose"].clone() # Clone to avoid in-place modification
@@ -122,8 +129,14 @@ def main(args):
                 # Combine Wrist (Joint 21) and RH Pose (15 joints)
                 r_init = torch.cat([result["pose"][:, 20:21, :], result["rh_pose"]], dim=1)
                 
+                check = check_coordinate_alignment(
+                    hand_refiner, mp_right, r_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=False,
+                    image_path=img_path, # Assuming scale is related to image size
+                    save_overlay=True, overlay_path=f"coord_check_{i}_right.png"
+                )
+                print("Coordinate alignment check completed. Overlay saved as:", f"coord_check_{i}_right.png")
                 refined_r_pose, _ = hand_refiner.refine(
-                    mp_right, r_init, result["betas"][:, :10], c_int, c_t, is_left=False
+                    mp_right, r_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=False
                 )
                 
                 result["pose"] = result["pose"].clone() # Clone to avoid in-place modification

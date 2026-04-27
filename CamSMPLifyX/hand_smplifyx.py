@@ -36,7 +36,7 @@ class HandOptimizer:
         projected_points = torch.einsum("bij,bkj->bki", K, projected_points.float())
         return projected_points[:, :, :2]
 
-    def refine(self, target_mp, init_pose, init_shape, cam_int, cam_t, is_left=True):
+    def refine(self, target_mp, init_pose, init_shape, cam_int, cam_t, bbox_center, bbox_scale, is_left=True):
         side = 'left' if is_left else 'right'
         model = self.models[side]
         target_2d = target_mp[:, :, :2].detach().to(self.device) 
@@ -47,6 +47,8 @@ class HandOptimizer:
         wrist_pose = init_pose[:, 0, :].clone().detach().requires_grad_(True)
         hand_pca = torch.zeros([1, self.num_pca], device=self.device, requires_grad=True)
         shape = init_shape.clone().detach().requires_grad_(True)
+        bbox_center = bbox_center.to(self.device).float()
+        bbox_scale = bbox_scale.to(self.device).float()
         
         # Store original wrist for strong regularization
         orig_wrist = init_pose[:, 0, :].clone().detach()
@@ -54,17 +56,18 @@ class HandOptimizer:
         # --- STAGE 1: Align Wrist Only (100 iterations) ---
         # We lock fingers in a neutral state to prevent the "broken wrist" artifact
         
-        initial_estimate = []
-        final_estimate = []
-        
         opt_s1 = torch.optim.Adam([wrist_pose], lr=0.01)
         for i in range(100):
             opt_s1.zero_grad()
             output = model(hand_pose=hand_pca, global_orient=wrist_pose, betas=shape)
-            loss_2d = torch.mean((self.perspective_projection(self.get_mano_landmarks(output), cam_t, cam_int) - target_2d)**2)
-            if i == 0:
-                initial_estimate = self.get_mano_landmarks(output).detach().cpu().numpy()
+            
+            estimate_2d = self.perspective_projection(self.get_mano_landmarks(output), cam_t.to(self.device).float(), cam_int.to(self.device).float())
+            estimate_2d = estimate_2d.detach() # Detach to prevent gradients flowing into camera params
+            estimate_2d = bbox_center + (estimate_2d - bbox_center) * (bbox_scale * 200.0) # Scale to image space
+            loss_2d = torch.mean((estimate_2d - target_2d)**2)
+            
             loss_wrist_reg = torch.mean((wrist_pose - orig_wrist)**2) * 50.0 # High weight
+            
             (loss_2d + loss_wrist_reg).backward()
             opt_s1.step()
 
@@ -74,9 +77,20 @@ class HandOptimizer:
         for _ in range(150):
             opt_s2.zero_grad()
             output = model(hand_pose=hand_pca, global_orient=wrist_pose, betas=shape)
-            loss_2d = torch.mean((self.perspective_projection(self.get_mano_landmarks(output), cam_t, cam_int) - target_2d)**2)
+            
+            estimate_2d = self.perspective_projection(self.get_mano_landmarks(output), cam_t.to(self.device).float(), cam_int.to(self.device).float())
+            estimate_2d = estimate_2d.detach() # Detach to prevent gradients flowing into camera params
+            estimate_2d = bbox_center + (estimate_2d - bbox_center) * (bbox_scale * 200.0) # Scale to image space
+            loss_2d = torch.mean((estimate_2d - target_2d)**2)
+            
             loss_wrist_reg = torch.mean((wrist_pose - orig_wrist)**2) * 50.0 # Keep wrist stable
-            loss_pca_prior = torch.mean(hand_pca**2) * 0.5 # Keeps fingers natural
+            
+            pca_weights = np.linspace(0.05, 0.5, self.num_pca)
+            pca_weights = torch.from_numpy(pca_weights).float().to(self.device)
+            threshold = 2.0
+            excess = torch.clamp(hand_pca.abs() - threshold, min=0.0)
+            loss_pca_prior = torch.mean(pca_weights * excess**2) * 0.5 # Keeps fingers natural
+            
             mano_3d = self.get_mano_landmarks(output)
             root_mano = mano_3d[:, 0:1, :]
             rel_mano_3d = mano_3d - root_mano
@@ -88,6 +102,8 @@ class HandOptimizer:
             norm_target_3d = rel_target_3d / (scale_target + 1e-6)
             loss_3d_pose = torch.mean((norm_mano_3d - norm_target_3d)**2)
             weight_3d = 5000.0
+            weight_3d = 0
+            
             (loss_2d + loss_wrist_reg + loss_pca_prior + weight_3d * loss_3d_pose).backward()
             opt_s2.step()
 
@@ -97,11 +113,21 @@ class HandOptimizer:
         for i in range(100):
             opt_s3.zero_grad()
             output = model(hand_pose=hand_pca, global_orient=wrist_pose, betas=shape)
-            loss_2d = torch.mean((self.perspective_projection(self.get_mano_landmarks(output), cam_t, cam_int) - target_2d)**2)
-            if i == 99:
-                final_estimate = self.get_mano_landmarks(output).detach().cpu().numpy()
+            
+            estimate_2d = self.perspective_projection(self.get_mano_landmarks(output), cam_t.to(self.device).float(), cam_int.to(self.device).float())
+            estimate_2d = estimate_2d.detach() # Detach to prevent gradients flowing into camera params
+            estimate_2d = bbox_center + (estimate_2d - bbox_center) * (bbox_scale * 200.0) # Scale to image space
+            loss_2d = torch.mean((estimate_2d - target_2d)**2)
+            
             loss_wrist_reg = torch.mean((wrist_pose - orig_wrist)**2) * 20.0
-            loss_pca_prior = torch.mean(hand_pca**2) * 0.2
+            
+            anneal = 1.0 - (i / 100.0)
+            pca_weights = np.linspace(0.05, 0.5, self.num_pca)
+            pca_weights = torch.from_numpy(pca_weights).float().to(self.device)
+            threshold = 2.0
+            excess = torch.clamp(hand_pca.abs() - threshold, min=0.0)
+            loss_pca_prior = torch.mean(hand_pca**2) * anneal
+            
             mano_3d = self.get_mano_landmarks(output)
             root_mano = mano_3d[:, 0:1, :]
             rel_mano_3d = mano_3d - root_mano
@@ -112,14 +138,12 @@ class HandOptimizer:
             norm_mano_3d = rel_mano_3d / (scale_mano + 1e-6)
             norm_target_3d = rel_target_3d / (scale_target + 1e-6)
             loss_3d_pose = torch.mean((norm_mano_3d - norm_target_3d)**2)
-            weight_3d = 10.0
+            weight_3d = 2000.0 + 3000.0 * (1.0 - anneal) # Increase 3D weight as we fine-tune
+            weight_3d = 0
+            
             (loss_2d + loss_wrist_reg + loss_pca_prior + weight_3d * loss_3d_pose).backward()
             opt_s3.step()
             
-            
-        print("Loss between initial and final 2D projections:", np.linalg.norm(initial_estimate - final_estimate))
-        print("Loss between initial and target 2D projection:", np.linalg.norm(initial_estimate - target_3d.detach().cpu().numpy()))
-        print("Loss between final 2D projection and target:", np.linalg.norm(final_estimate - target_3d.detach().cpu().numpy()))
 
         # Convert PCA back to raw 15-joint angles for compatibility with optimize.py
         final_output = model(hand_pose=hand_pca, global_orient=wrist_pose, betas=shape)
