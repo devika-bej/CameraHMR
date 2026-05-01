@@ -103,14 +103,14 @@ def main(args):
                 # Combine Wrist (Joint 20) and LH Pose (15 joints)
                 l_init = torch.cat([result["pose"][:, 19:20, :], result["lh_pose"]], dim=1)
                 
-                check = check_coordinate_alignment(
-                    hand_refiner, mp_left, l_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=True,
-                    image_path=img_path, # Assuming scale is related to image size
-                    save_overlay=True, overlay_path=f"coord_check_{i}_left.png"
-                )
-                print("Coordinate alignment check completed. Overlay saved as:", f"coord_check_{i}_left.png")
+                # check = check_coordinate_alignment(
+                #     hand_refiner, mp_left, l_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=True,
+                #     image_path=img_path, # Assuming scale is related to image size
+                #     save_overlay=True, overlay_path=f"coord_check_{i}_left.png"
+                # )
+                # print("Coordinate alignment check completed. Overlay saved as:", f"coord_check_{i}_left.png")
                 refined_l_pose, _ = hand_refiner.refine(
-                    mp_left, l_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=True
+                    mp_left, l_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=True, inp_image_path=img_path
                 )
                 
                 result["pose"] = result["pose"].clone() # Clone to avoid in-place modification
@@ -129,14 +129,14 @@ def main(args):
                 # Combine Wrist (Joint 21) and RH Pose (15 joints)
                 r_init = torch.cat([result["pose"][:, 20:21, :], result["rh_pose"]], dim=1)
                 
-                check = check_coordinate_alignment(
-                    hand_refiner, mp_right, r_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=False,
-                    image_path=img_path, # Assuming scale is related to image size
-                    save_overlay=True, overlay_path=f"coord_check_{i}_right.png"
-                )
-                print("Coordinate alignment check completed. Overlay saved as:", f"coord_check_{i}_right.png")
+                # check = check_coordinate_alignment(
+                #     hand_refiner, mp_right, r_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=False,
+                #     image_path=img_path, # Assuming scale is related to image size
+                #     save_overlay=True, overlay_path=f"coord_check_{i}_right.png"
+                # )
+                # print("Coordinate alignment check completed. Overlay saved as:", f"coord_check_{i}_right.png")
                 refined_r_pose, _ = hand_refiner.refine(
-                    mp_right, r_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=False
+                    mp_right, r_init, result["betas"][:, :10], c_int, c_t, center, scale, is_left=False, inp_image_path=img_path
                 )
                 
                 result["pose"] = result["pose"].clone() # Clone to avoid in-place modification
