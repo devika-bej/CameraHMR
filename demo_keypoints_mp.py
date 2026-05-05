@@ -6,6 +6,8 @@ from pathlib import Path
 from glob import glob
 import mediapipe as mp
 
+from CamSMPLifyX.utils.image_utils import crop, transform
+
 # Detectron2 imports retained for bounding box generation
 from core.constants import DETECTRON_CKPT, DETECTRON_CFG
 from detectron2.config import LazyConfig
@@ -17,6 +19,8 @@ mp_pose = mp.solutions.pose
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
+
+IMG_RES = 768
 
 
 def init_detector(threshold):
@@ -44,6 +48,8 @@ def process_image(args, image_path, detector, pose_model, hands_model, output_fo
     det_instances = det_out['instances']
     valid_idx = (det_instances.pred_classes == 0) & (det_instances.scores > args.detector_threshold)
     boxes = det_instances.pred_boxes.tensor[valid_idx].cpu().numpy()
+    bbox_scale = (boxes[:, 2:4] - boxes[:, 0:2]) / 200.0
+    bbox_center = (boxes[:, 2:4] + boxes[:, 0:2]) / 2
 
     if len(boxes) == 0:
         print(f"No valid detections for {image_path}")
@@ -56,74 +62,52 @@ def process_image(args, image_path, detector, pose_model, hands_model, output_fo
     for ind, box in enumerate(boxes):
         x1, y1, x2, y2 = map(int, box)
         
-        # Add a 10% margin to the bounding box to ensure full limbs/hands are captured
-        margin_x = int((x2 - x1) * 0.1)
-        margin_y = int((y2 - y1) * 0.1)
-        x1, y1 = max(0, x1 - margin_x), max(0, y1 - margin_y)
-        x2, y2 = min(w_full, x2 + margin_x), min(h_full, y2 + margin_y)
-        
-        crop = img_cv2[y1:y2, x1:x2]
-        if crop.size == 0:
+        crop_temp = img_cv2[y1:y2, x1:x2]
+        if crop_temp.size == 0:
             continue
             
-        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        h_crop, w_crop, _ = crop.shape
+        crop_rgb = cv2.cvtColor(crop_temp, cv2.COLOR_BGR2RGB)
+        h_crop, w_crop, _ = crop_rgb.shape
+        crop_resized = crop(annotated_img, bbox_center[ind], bbox_scale[ind], [IMG_RES, IMG_RES]).astype(np.uint8)
 
         # 3. MediaPipe Processing on the crop
-        pose_results = pose_model.process(crop_rgb)
         hands_results = hands_model.process(crop_rgb)
 
-        person_kps = {'bbox': [x1, y1, x2, y2], 'pose': None, 'hands': []}
-
-        # ── Map and Draw POSE ──────────────────────────────────────────────────
-        if pose_results.pose_landmarks:
-            pose_coords = []
-            for lm in pose_results.pose_landmarks.landmark:
-                # Map back to absolute image coordinates for storage
-                abs_x = lm.x * w_crop + x1
-                abs_y = lm.y * h_crop + y1
-                pose_coords.append([abs_x, abs_y, lm.z, lm.visibility])
-                
-                # Update landmark directly so mp_drawing plots correctly on the full image
-                lm.x = abs_x / w_full
-                lm.y = abs_y / h_full
-                
-            person_kps['pose'] = np.array(pose_coords)
-            
-            mp_drawing.draw_landmarks(
-                annotated_img,
-                pose_results.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style(),
-            )
+        person_kps = {'pose': None, 'hands': []}
 
         # ── Map and Draw HANDS ─────────────────────────────────────────────────
         if hands_results.multi_hand_landmarks:
             for hand_landmarks, handedness in zip(hands_results.multi_hand_landmarks, hands_results.multi_handedness):
                 hand_coords = []
                 for lm in hand_landmarks.landmark:
-                    # Map back to absolute image coordinates for storage
-                    abs_x = lm.x * w_crop + x1
-                    abs_y = lm.y * h_crop + y1
+                    abs_x = lm.x * IMG_RES
+                    abs_y = lm.y * IMG_RES
                     hand_coords.append([abs_x, abs_y, lm.z])
-                    
-                    # Update landmark directly so mp_drawing plots correctly on the full image
-                    lm.x = abs_x / w_full
-                    lm.y = abs_y / h_full
                 
                 label = handedness.classification[0].label
                 person_kps['hands'].append({
                     'label': label,
                     'keypoints': np.array(hand_coords)
                 })
+                
 
-                # mp_drawing.draw_landmarks(
-                #     annotated_img,
-                #     hand_landmarks,
-                #     mp_hands.HAND_CONNECTIONS,
-                #     mp_drawing_styles.get_default_hand_landmarks_style(),
-                #     mp_drawing_styles.get_default_hand_connections_style(),
-                # )
+                mp_drawing.draw_landmarks(
+                    crop_resized,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style(),
+                )
+                
+                mp_drawing.draw_landmarks(
+                    crop_rgb,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style(),
+                )
+                
+                # print(hand_landmarks)
         
         image_results.append(person_kps)
         # print(f"Person {ind}:")
@@ -138,9 +122,11 @@ def process_image(args, image_path, detector, pose_model, hands_model, output_fo
             else:
                 estimation_data['mediapipe_kp_right'].append(hand['keypoints'])
 
-    # save_filename = os.path.join(output_folder, Path(image_path).name)
-    # cv2.imwrite(save_filename, annotated_img)
-    # print(f"Processed and saved: {save_filename}")
+    save_filename = os.path.join(output_folder, Path(image_path).name)
+    cv2.imwrite(save_filename, crop_resized)
+    save_filename = os.path.join(output_folder, f"annotated_{Path(image_path).name}")
+    cv2.imwrite(save_filename, crop_rgb)
+    print(f"Processed and saved: {save_filename}")
 
 
 def main():
