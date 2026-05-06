@@ -4,6 +4,17 @@ import smplx
 import numpy as np
 import os
 import cv2
+from utils.image_utils import crop
+from utils.smplx_openpose import SMPLX_
+from constants import (
+    SMPLX_MODEL_DIR,
+    NUM_BETAS_SMPLX,
+    SMPLX2SMPL,
+    DOWNSAMPLE_MAT,
+    LOSS_CUT,
+    LOW_THRESHOLD,
+    HIGH_THRESHOLD,
+)
 
 MANO_JOINT_NAMES = [
     "Wrist",
@@ -15,34 +26,6 @@ MANO_JOINT_NAMES = [
 ]
 
 IMG_RES = 768
-
-def _save_overlay(image_path, mano_proj, mp_xy, out_path):
-    """Draw both sets of landmarks on the image for visual inspection."""
-    img = cv2.imread(image_path)
-    if img is None:
-        print(f"  Could not load image from {image_path}")
-        return
-
-    mano_proj = mano_proj[0]
-    mp_xy = mp_xy[0]
-    for i in range(len(MANO_JOINT_NAMES)):
-        mx, my = int(mano_proj[i, 0]), int(mano_proj[i, 1])
-        px, py = int(mp_xy[i, 0]),    int(mp_xy[i, 1])
-
-        # MANO projected = blue circles
-        cv2.circle(img, (mx, my), 6, (255, 80, 80), -1)
-        # MediaPipe target = green circles
-        cv2.circle(img, (px, py), 6, (80, 255, 80), -1)
-        # Error line connecting them
-        cv2.line(img, (mx, my), (px, py), (0, 0, 255), 1)
-
-    # Legend
-    cv2.putText(img, "MANO proj (blue)", (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 80, 80), 2)
-    cv2.putText(img, "MediaPipe (green)", (20, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 255, 80), 2)
-
-    cv2.imwrite(out_path, img)
 
 def get_transform(center, scale, res):
     """Generate transformation matrix."""
@@ -73,60 +56,66 @@ def j2d_processing(kp, center, scale):
 def perspective_projection(points, translation, cam_intrinsics):
     K = cam_intrinsics
     points_translated = points + translation.unsqueeze(0)
-    projected_points = points_translated / points_translated[:, -1].unsqueeze(-1)  
+    projected_points = points_translated / points_translated[:, -1].unsqueeze(-1)
     projected_points = torch.einsum('ij,kj->ki', K, projected_points.float())
     return projected_points
 
 class HandOptimizer:
-    def __init__(self, model_path, device=torch.device("cuda")):
+    def __init__(self, device=torch.device("cuda")):
         self.device = device
-        self.models = {
-            'left': smplx.create(model_path, model_type='mano', is_rhand=False, 
-                                 use_pca=False, flat_hand_mean=True).to(device),
-            'right': smplx.create(model_path, model_type='mano', is_rhand=True, 
-                                  use_pca=False, flat_hand_mean=True).to(device)
-        }
-        
-        self.FINGER_TIPS_V_IDS = [745, 317, 444, 556, 673]
-        self.MP_TO_MANO_MAP = [0, 13, 14, 15, -1, 1, 2, 3, -2, 4, 5, 6, -3, 10, 11, 12, -4, 7, 8, 9, -5]
+        self.model = SMPLX_(SMPLX_MODEL_DIR, num_betas=NUM_BETAS_SMPLX, use_pca=False).to(self.device)
+        self.FINGER_TIPS_V_IDS_LH = [5361, 4933, 5058, 5169, 5286]
+        self.FINGER_TIPS_V_IDS_RH = [8079, 7669, 7794, 7905, 8022]
+        self.MP_TO_MANO_MAP = [100, 12, 13, 14, -1, 0, 1, 2, -2, 3, 4, 5, -3, 9, 10, 11, -4, 6, 7, 8, -5]
 
-    def get_mano_landmarks(self, output):
-        joints = output.joints 
-        verts = output.vertices
-        landmarks = []
+    def get_mano_landmarks(self, body_joints, lh_joints, rh_joints, vertices):
+        landmarks_lh = []
+        landmarks_rh = []
         for idx in self.MP_TO_MANO_MAP:
-            if idx >= 0:
-                landmarks.append(joints[:, idx, :])
+            if idx == 100:
+                landmarks_lh.append(body_joints[:, 20, :])
+                landmarks_rh.append(body_joints[:, 21, :])
+            elif idx >= 0:
+                landmarks_lh.append(lh_joints[:, idx, :])
+                landmarks_rh.append(rh_joints[:, idx, :])
             else:
-                v_idx = self.FINGER_TIPS_V_IDS[abs(idx) - 1]
-                landmarks.append(verts[:, v_idx, :])
-        return torch.stack(landmarks, dim=1)
-    
-    def refine(self, target_mp, init_pose, init_shape, cam_int, cam_t, bbox_center, bbox_scale, is_left=True, inp_image_path=None):
-        side = 'left' if is_left else 'right'
-        model = self.models[side]
+                v_idx = abs(idx) - 1
+                landmarks_lh.append(vertices[:, self.FINGER_TIPS_V_IDS_LH[v_idx], :])
+                landmarks_rh.append(vertices[:, self.FINGER_TIPS_V_IDS_RH[v_idx], :])
+        return torch.stack(landmarks_lh, dim=1), torch.stack(landmarks_rh, dim=1)
+
+    def refine(self, global_orient, body_pose, left_hand_pose, right_hand_pose, betas, cam_t, cam_int, bbox_center, bbox_scale, target_mp, img_path):
+        smplx_output = self.model(
+            global_orient=global_orient,
+            body_pose=body_pose,
+            left_hand_pose=left_hand_pose,
+            right_hand_pose=right_hand_pose,
+            betas=betas
+        )
+        body_joints = smplx_output.joints
+        lh_joints = smplx_output.joints[:, 25:40, :]
+        rh_joints = smplx_output.joints[:, 40:55, :]
+        
+        estimate_3d_lh, estimate_3d_rh = self.get_mano_landmarks(body_joints, lh_joints, rh_joints, smplx_output.vertices)
+        estimate_2d_lh = perspective_projection(estimate_3d_lh[0], cam_t, cam_int[0])
+        estimate_2d_lh = j2d_processing(estimate_2d_lh[:, :-1], bbox_center, bbox_scale)
+        estimate_2d_lh = estimate_2d_lh.unsqueeze(0)
+        estimate_2d_rh = perspective_projection(estimate_3d_rh[0], cam_t, cam_int[0])
+        estimate_2d_rh = j2d_processing(estimate_2d_rh[:, :-1], bbox_center, bbox_scale)
+        estimate_2d_rh = estimate_2d_rh.unsqueeze(0)
+        
         target_2d = target_mp[:, :, :2].to(self.device)
         
-        init_pose = init_pose.reshape(1, -1)
-        wrist_pose = init_pose[:, :3]
-        hand_pose = init_pose[:, 3:]
-        shape = init_shape
-        bbox_center = bbox_center.to(self.device).float()
-        bbox_scale = bbox_scale.to(self.device).float()
-
-        output = model(hand_pose=hand_pose, global_orient=wrist_pose, betas=shape)
-        estimate_3d = self.get_mano_landmarks(output), cam_t.to(self.device).float(), cam_int.to(self.device).float()
-        # _save_overlay(inp_image_path, estimate_3d[0][0][:, :-1].unsqueeze(0).detach().cpu().numpy(), target_2d.detach().cpu().numpy(), f"initial_overlay_{side}.jpg")
-        estimate_2d = perspective_projection(estimate_3d[0][0], cam_t.to(self.device).float(), cam_int.to(self.device).float()[0])
-        estimate_2d = j2d_processing(estimate_2d[:, :-1], bbox_center, bbox_scale)
-        estimate_2d = estimate_2d.unsqueeze(0)
-        # estimate_2d = estimate_2d + bbox_center
-        # estimate_2d = estimate_2d[:, :-1].unsqueeze(0)
-        print(estimate_2d)
-        print(target_2d)
-        _save_overlay(inp_image_path, estimate_2d.detach().cpu().numpy(), target_2d.detach().cpu().numpy(), f"overlay_debug_{side}.jpg")
-
-
+        img = cv2.imread(img_path)
+        img_cropped = crop(img, bbox_center.cpu().numpy(), bbox_scale.cpu().numpy(), [IMG_RES, IMG_RES])
+        for i in range(estimate_2d_lh.shape[1]):
+            cv2.circle(img_cropped, (int(estimate_2d_lh[0, i, 0].item()), int(estimate_2d_lh[0, i, 1].item())), 5, (0, 255, 0), -1)
+        for i in range(estimate_2d_rh.shape[1]):
+            cv2.circle(img_cropped, (int(estimate_2d_rh[0, i, 0].item()), int(estimate_2d_rh[0, i, 1].item())), 5, (255, 0, 0), -1)
+        for i in range(target_2d.shape[1]):
+            cv2.circle(img_cropped, (int(target_2d[0, i, 0].item()), int(target_2d[0, i, 1].item())), 5, (0, 0, 255), -1)
+        cv2.imwrite("hand_smplifyx_output.png", img_cropped)
+        
 if __name__ == "__main__":
     init_param_file = sys.argv[1]
     img_folder = sys.argv[2]
@@ -139,23 +128,21 @@ if __name__ == "__main__":
     bbox_scale = torch.tensor(inp_data["scale"][0]).to("cuda").float()
     shape = torch.tensor(np.expand_dims(inp_data["shape"][0], axis=0)).to("cuda").float()
     pose = torch.tensor(np.expand_dims(inp_data["body_pose"][0], axis=0)).to("cuda").float()
-    
+    global_orient = torch.tensor(np.expand_dims(inp_data["global_orient"][0], axis=0)).to("cuda").float()
     lh_pose = torch.tensor(np.expand_dims(inp_data["left_hand_pose"][0], axis=0)).to("cuda").float()
-    lh_pose = torch.cat([pose[:, 19:20, :], lh_pose], dim=1) # Combine Wrist and LH Pose
     rh_pose = torch.tensor(np.expand_dims(inp_data["right_hand_pose"][0], axis=0)).to("cuda").float()
-    rh_pose = torch.cat([pose[:, 20:21, :], rh_pose], dim=1) # Combine Wrist and RH Pose
-
-    # print("mp_left shape:", mp_left.shape)
-    # print("mp_right shape:", mp_right.shape)
-    # print("cam_int shape:", cam_int.shape)
-    # print("cam_t shape:", cam_t.shape)
-    # print("bbox_center shape:", bbox_center.shape)
-    # print("bbox_scale shape:", bbox_scale.shape)
-    # print("shape shape:", shape.shape)
-    # print("pose shape:", pose.shape)
-    # print("lh_pose shape:", lh_pose.shape)
-    # print("rh_pose shape:", rh_pose.shape)
-
-    hand_refiner = HandOptimizer(model_path="./data/models/")
-    hand_refiner.refine(mp_left, lh_pose, shape[:, :10], cam_int, cam_t, bbox_center, bbox_scale, is_left=True, inp_image_path=os.path.join(img_folder, inp_data["imgname"][0]))
-    hand_refiner.refine(mp_right, rh_pose, shape[:, :10], cam_int, cam_t, bbox_center, bbox_scale, is_left=False, inp_image_path=os.path.join(img_folder, inp_data["imgname"][0]))
+    
+    optimizer = HandOptimizer()
+    optimizer.refine(
+        global_orient=global_orient,
+        body_pose=pose,
+        left_hand_pose=lh_pose,
+        right_hand_pose=rh_pose,
+        betas=shape,
+        cam_t=cam_t,
+        cam_int=cam_int,
+        bbox_center=bbox_center,
+        bbox_scale=bbox_scale,
+        target_mp=torch.cat((mp_left, mp_right), dim=1),
+        img_path=os.path.join(img_folder, inp_data["imgname"][0])
+    )
