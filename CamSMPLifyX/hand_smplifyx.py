@@ -27,13 +27,15 @@ MANO_JOINT_NAMES = [
 
 IMG_RES = 768
 
-def _save_overlay(image_path, mano_proj, mp_xy, out_path):
+def _save_overlay(image_path, bbox_center, bbox_scale, mano_proj, mp_xy, out_path):
     """Draw both sets of landmarks on the image for visual inspection."""
     img = cv2.imread(image_path)
     if img is None:
         print(f"  Could not load image from {image_path}")
         return
-    mano_proj = mano_proj[0]
+    img = crop(img, bbox_center.cpu().numpy(), bbox_scale.cpu().numpy(), [IMG_RES, IMG_RES])
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    img = np.ascontiguousarray(img)
     
     mano_proj_1 = mano_proj[0]
     mp_xy_1 = mp_xy[0]
@@ -126,8 +128,11 @@ class HandOptimizer:
         return torch.stack(landmarks_lh, dim=1), torch.stack(landmarks_rh, dim=1)
 
     def refine(self, global_orient, body_pose, left_hand_pose, right_hand_pose, betas, cam_t, cam_int, bbox_center, bbox_scale, target_mp, img_path):
+        left_hand_pose.requires_grad = True
+        right_hand_pose.requires_grad = True
         opt = torch.optim.Adam([left_hand_pose, right_hand_pose], lr=0.01)
-        for iter in range(100):
+        num_epochs = 100
+        for epoch in range(num_epochs):
             opt.zero_grad()
             
             smplx_output = self.model(
@@ -149,19 +154,21 @@ class HandOptimizer:
             estimate_2d_rh = perspective_projection(estimate_3d_rh[0], cam_t, cam_int[0])
             estimate_2d_rh = j2d_processing(estimate_2d_rh[:, :-1], bbox_center, bbox_scale)
             estimate_2d_rh = estimate_2d_rh.unsqueeze(0)
+            estimate_2d = torch.cat((estimate_2d_lh, estimate_2d_rh), dim=0)
             
             target_2d = target_mp[:, :, :2].to(self.device)
             
-            if iter == 0:
-                _save_overlay(img_path, torch.stack((estimate_2d_lh, estimate_2d_rh), dim=1), target_2d, "initial_overlay.jpg")
-            if iter == 99:
-                _save_overlay(img_path, torch.stack((estimate_2d_lh, estimate_2d_rh), dim=1), target_2d, "final_overlay.jpg")
+            if epoch == 0:
+                _save_overlay(img_path, bbox_center, bbox_scale,
+                              estimate_2d.cpu().detach().numpy(), target_2d.cpu().detach().numpy(), "initial_overlay.png")
+            if epoch == num_epochs - 1:
+                _save_overlay(img_path, bbox_center, bbox_scale,
+                              estimate_2d.cpu().detach().numpy(), target_2d.cpu().detach().numpy(), "final_overlay.png")
             
-            loss_lh = torch.mean((estimate_2d_lh - target_2d[0]) ** 2)
-            loss_rh = torch.mean((estimate_2d_rh - target_2d[1]) ** 2)
+            loss_lh = torch.mean((estimate_2d_lh[0] - target_2d[0]) ** 2)
+            loss_rh = torch.mean((estimate_2d_rh[0] - target_2d[1]) ** 2)
             loss = loss_lh + loss_rh
+            # print(f"epochation {epoch+1}/100, Loss: {loss.item():.4f}")
             loss.backward()
             opt.step()
-            opt.zero_grad()
-        
         return left_hand_pose, right_hand_pose

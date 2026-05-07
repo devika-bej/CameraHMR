@@ -14,7 +14,7 @@ from core.constants import SMPLX_MODEL_DIR, SMPL_MODEL_PATH # Import your paths
 def aa_to_rotmat(axis_angle):
     """
     Helper function to convert axis-angle vectors to 3x3 rotation matrices.
-    Input: numpy array of shape (..., 3)
+    Input: numpy array of shape (..., 3)CamSMPLifyX/
     Output: numpy array of shape (..., 3, 3)
     """
     original_shape = axis_angle.shape
