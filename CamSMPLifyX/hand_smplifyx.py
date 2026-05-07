@@ -16,6 +16,8 @@ from constants import (
     HIGH_THRESHOLD,
 )
 
+import torch.nn as nn
+
 MANO_JOINT_NAMES = [
     "Wrist",
     "Index_MCP", "Index_PIP", "Index_DIP", "Index_TIP",
@@ -131,7 +133,7 @@ class HandOptimizer:
         left_hand_pose.requires_grad = True
         right_hand_pose.requires_grad = True
         opt = torch.optim.Adam([left_hand_pose, right_hand_pose], lr=0.01)
-        num_epochs = 100
+        num_epochs = 300
         for epoch in range(num_epochs):
             opt.zero_grad()
             
@@ -149,9 +151,11 @@ class HandOptimizer:
             
             estimate_3d_lh, estimate_3d_rh = self.get_mano_landmarks(body_joints, lh_joints, rh_joints, smplx_output.vertices)
             estimate_2d_lh = perspective_projection(estimate_3d_lh[0], cam_t, cam_int[0])
+            estimate_2d_lh_conf = estimate_2d_lh[:, -1]
             estimate_2d_lh = j2d_processing(estimate_2d_lh[:, :-1], bbox_center, bbox_scale)
             estimate_2d_lh = estimate_2d_lh.unsqueeze(0)
             estimate_2d_rh = perspective_projection(estimate_3d_rh[0], cam_t, cam_int[0])
+            estimate_2d_rh_conf = estimate_2d_rh[:, -1]
             estimate_2d_rh = j2d_processing(estimate_2d_rh[:, :-1], bbox_center, bbox_scale)
             estimate_2d_rh = estimate_2d_rh.unsqueeze(0)
             estimate_2d = torch.cat((estimate_2d_lh, estimate_2d_rh), dim=0)
@@ -160,15 +164,16 @@ class HandOptimizer:
             
             if epoch == 0:
                 _save_overlay(img_path, bbox_center, bbox_scale,
-                              estimate_2d.cpu().detach().numpy(), target_2d.cpu().detach().numpy(), "initial_overlay.png")
+                              estimate_2d.cpu().detach().numpy(), target_2d.cpu().detach().numpy(), f"initial_overlay.png")
             if epoch == num_epochs - 1:
                 _save_overlay(img_path, bbox_center, bbox_scale,
                               estimate_2d.cpu().detach().numpy(), target_2d.cpu().detach().numpy(), "final_overlay.png")
             
-            loss_lh = torch.mean((estimate_2d_lh[0] - target_2d[0]) ** 2)
-            loss_rh = torch.mean((estimate_2d_rh[0] - target_2d[1]) ** 2)
-            loss = loss_lh + loss_rh
-            # print(f"epochation {epoch+1}/100, Loss: {loss.item():.4f}")
+            loss_lh = nn.HuberLoss()(estimate_2d_lh[0], target_2d[0])
+            loss_rh = nn.HuberLoss()(estimate_2d_rh[0], target_2d[1])
+            pose_prior = torch.sum(left_hand_pose ** 2) + torch.sum(right_hand_pose ** 2)
+            loss = loss_lh + loss_rh + 0.05 * pose_prior
+            print(f"epochation {epoch+1}/100, Loss: {loss.item():.4f}")
             loss.backward()
             opt.step()
         return left_hand_pose, right_hand_pose
