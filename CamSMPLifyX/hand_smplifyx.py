@@ -77,17 +77,13 @@ def _save_overlay(image_path, bbox_center, bbox_scale, mano_proj, mp_xy, out_pat
     img = np.clip(img, 0, 255).astype(np.uint8)
     img = np.ascontiguousarray(img)
 
-    # mano_proj shape: [2, 21, 2]
-    # mp_xy shape:    [2, 21, 2]
-    # 0 = left, 1 = right
-
     colors = {
-        "mano_left": (255, 80, 80),      # blue-ish
-        "mp_left": (80, 255, 80),        # green
-        "mano_right": (255, 255, 80),    # cyan-ish
-        "mp_right": (80, 180, 255),      # orange-ish
-        "line_left": (0, 0, 255),        # red
-        "line_right": (255, 0, 255),     # magenta
+        "mano_left": (255, 80, 80),      
+        "mp_left": (80, 255, 80),        
+        "mano_right": (255, 255, 80),    
+        "mp_right": (80, 180, 255),      
+        "line_left": (0, 0, 255),        
+        "line_right": (255, 0, 255),     
     }
 
     for hand_idx, hand_name in enumerate(["left", "right"]):
@@ -184,12 +180,6 @@ def j2d_processing(kp, center, scale):
 def perspective_projection(points, translation, cam_intrinsics):
     """
     Project 3D points using camera translation and intrinsics.
-
-    points:         [N, 3]
-    translation:    [3]
-    cam_intrinsics: [3, 3]
-
-    returns:        [N, 3], where first two columns are pixel x/y.
     """
     K = cam_intrinsics
 
@@ -210,10 +200,6 @@ def perspective_projection(points, translation, cam_intrinsics):
 def valid_keypoint_mask(kp_2d, eps=1e-6):
     """
     Returns a mask for valid 2D keypoints.
-
-    kp_2d: [21, 2]
-
-    This masks NaNs/Infs and all-zero missing detections.
     """
     finite = torch.isfinite(kp_2d).all(dim=-1)
     non_zero = torch.linalg.norm(kp_2d, dim=-1) > eps
@@ -223,9 +209,6 @@ def valid_keypoint_mask(kp_2d, eps=1e-6):
 def masked_mean(values, mask):
     """
     Safe masked mean.
-
-    values: [N]
-    mask:   [N]
     """
     mask = mask.float()
     denom = mask.sum().clamp_min(1.0)
@@ -235,42 +218,13 @@ def masked_mean(values, mask):
 def robust_2d_reprojection_loss(pred_2d, target_2d, valid_mask=None, delta=25.0):
     """
     Robust 2D reprojection loss using Huber penalty on joint-wise pixel error.
-
-    pred_2d:   [21, 2]
-    target_2d: [21, 2]
-
-    Returns a scalar.
     """
     return torch.mean(F.huber_loss(pred_2d, target_2d))
-    # diff = pred_2d - target_2d
-    # err = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-8)
-
-    # # Huber on Euclidean pixel error.
-    # # For small errors: quadratic.
-    # # For large errors: linear, so noisy MediaPipe points do not dominate.
-    # quadratic = 0.5 * (err ** 2) / delta
-    # linear = err - 0.5 * delta
-
-    # loss_per_joint = torch.where(err < delta, quadratic, linear)
-
-    # if valid_mask is None:
-    #     return loss_per_joint.mean()
-
-    # return masked_mean(loss_per_joint, valid_mask)
 
 
 def bone_direction_loss(pred_2d, target_2d, valid_mask=None, eps=1e-6):
     """
     2D bone direction loss.
-
-    Encourages each predicted finger bone to point in the same 2D direction
-    as the target bone.
-
-    This is more useful than 2D bone length loss because bone lengths can vary
-    with crop scale, perspective, and noisy detections.
-
-    pred_2d:   [21, 2]
-    target_2d: [21, 2]
     """
     device = pred_2d.device
 
@@ -287,152 +241,6 @@ def bone_direction_loss(pred_2d, target_2d, valid_mask=None, eps=1e-6):
     targ_vec = target_2d[..., end_idx, :] - target_2d[..., start_idx, :]
     
     return torch.mean(1 - F.cosine_similarity(pred_vec, targ_vec, eps=eps))
-
-    # pred_len = torch.linalg.norm(pred_vec, dim=-1).clamp_min(eps)
-    # targ_len = torch.linalg.norm(targ_vec, dim=-1).clamp_min(eps)
-
-    # pred_dir = pred_vec / pred_len.unsqueeze(-1)
-    # targ_dir = targ_vec / targ_len.unsqueeze(-1)
-
-    # cosine = torch.sum(pred_dir * targ_dir, dim=-1)
-    # cosine = cosine.clamp(min=-1.0, max=1.0)
-
-    # loss_per_bone = 1.0 - cosine
-
-    # bone_valid = torch.ones(
-    #     len(HAND_BONES),
-    #     device=device,
-    #     dtype=torch.bool
-    # )
-
-    # if valid_mask is not None:
-    #     bone_valid = valid_mask[start_idx] & valid_mask[end_idx]
-
-    # return masked_mean(loss_per_bone, bone_valid)
-
-
-def pose_deviation_prior(current_pose, initial_pose):
-    """
-    Penalize moving too far from the initial hand pose.
-
-    This is useful for single-image fitting because 2D keypoints alone are
-    ambiguous and can push the hand into implausible 3D poses.
-    """
-    return torch.mean((current_pose - initial_pose) ** 2)
-
-
-def axis_angle_to_matrix(axis_angle):
-    """
-    Convert axis-angle representation to a 3x3 rotation matrix.
-    axis_angle: Tensor of shape (..., 3)
-    Returns: Tensor of shape (..., 3, 3)
-    """
-    # Calculate the angle (magnitude) and the normalized axis
-    angle = torch.linalg.norm(axis_angle, dim=-1, keepdim=True)
-    axis = axis_angle / (angle + 1e-7)  # Add epsilon to prevent division by zero
-    
-    cos_a = torch.cos(angle)
-    sin_a = torch.sin(angle)
-    
-    # Split axis components
-    x, y, z = axis[..., 0:1], axis[..., 1:2], axis[..., 2:3]
-    
-    # Create the skew-symmetric matrix K
-    zero = torch.zeros_like(x)
-    K = torch.stack([
-        torch.cat([zero, -z, y], dim=-1),
-        torch.cat([z, zero, -x], dim=-1),
-        torch.cat([-y, x, zero], dim=-1)
-    ], dim=-2)
-    
-    # Identity matrix
-    I = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype)
-    
-    # Rodrigues' formula: R = I + sin(a)*K + (1 - cos(a))*K^2
-    R = I + sin_a.unsqueeze(-1) * K + (1 - cos_a.unsqueeze(-1)) * torch.matmul(K, K)
-    return R
-
-
-def matrix_to_euler_angles(matrix):
-    """
-    Convert a 3x3 rotation matrix to XYZ Euler angles.
-    matrix: Tensor of shape (..., 3, 3)
-    Returns: Tensor of shape (..., 3) containing (x, y, z) angles in radians.
-    """
-    # Calculate cosine of the y-angle (pitch) to check for Gimbal lock
-    sy = torch.sqrt(matrix[..., 0, 0]**2 + matrix[..., 0, 1]**2)
-    
-    # Boolean mask for Gimbal lock condition
-    singular = sy < 1e-6
-    
-    # Normal case
-    x = torch.atan2(-matrix[..., 1, 2], matrix[..., 2, 2])
-    y = torch.atan2(matrix[..., 0, 2], sy)
-    z = torch.atan2(-matrix[..., 0, 1], matrix[..., 0, 0])
-    
-    # Singular case (Gimbal lock)
-    x_sing = torch.atan2(matrix[..., 2, 1], matrix[..., 1, 1])
-    y_sing = torch.atan2(matrix[..., 0, 2], sy)
-    z_sing = torch.zeros_like(x_sing)
-    
-    # Use torch.where to apply the singular case math only where needed
-    x = torch.where(singular, x_sing, x)
-    y = torch.where(singular, y_sing, y)
-    z = torch.where(singular, z_sing, z)
-    
-    return torch.stack([x, y, z], dim=-1)
-
-
-def axis_angle_limit_loss(hand_pose, is_right=True):
-    """
-    Soft limit on axis-angle magnitudes.
-
-    hand_pose is usually [1, 45] for 15 hand joints x 3 axis-angle values.
-    This is a simple anatomical regularizer to discourage extreme rotations.
-    """
-    pose = hand_pose.reshape(-1, 3)
-    
-    rot_mats = axis_angle_to_matrix(pose)
-    euler_angles = matrix_to_euler_angles(rot_mats) 
-    
-    if not is_right:
-        x_min, x_max = -0.1745, 1.5708
-    else:
-        x_min, x_max = -1.5708, 0.1745
-    
-    yz_limit = 0.1745
-    
-    x_excess_upper = torch.relu(euler_angles[1:, 0] - x_max)
-    x_excess_lower = torch.relu(x_min - euler_angles[1:, 0]) # Penalizes going below x_min
-    
-    y_excess = torch.relu(torch.abs(euler_angles[1:, 1]) - yz_limit)
-    z_excess = torch.relu(torch.abs(euler_angles[1:, 2]) - yz_limit)
-    
-    total_excess = x_excess_upper + x_excess_lower + y_excess + z_excess
-    
-    return torch.mean(total_excess ** 2)
-
-
-def relative_depth_loss(pred_3d, target_3d, eps=1e-6):
-    """
-    Forces the Z-direction of the 3D mesh to match MediaPipe's predicted Z-direction.
-    pred_3d: [21, 3] (SMPL-X joints in camera space)
-    target_3d: [21, 3] (MediaPipe raw 3D output)
-    """
-    # Extract Z coordinates
-    pred_z = pred_3d[:, 2]
-    target_z = target_3d[:, 2]
-    
-    # Center depth around the wrist (index 0)
-    pred_z_rel = pred_z - pred_z[0]
-    target_z_rel = target_z - target_z[0]
-    
-    # Normalize by the scale of the hand to make them comparable
-    pred_norm = pred_z_rel / (torch.max(torch.abs(pred_z_rel)) + eps)
-    target_norm = target_z_rel / (torch.max(torch.abs(target_z_rel)) + eps)
-    
-    # MSE on the normalized depth profile
-    return torch.mean((pred_norm - target_norm) ** 2)
 
 
 class HandOptimizer:
@@ -464,7 +272,6 @@ class HandOptimizer:
         self.loss_weights = {
             "kp2d": 1.0,
             "bone_dir": 150.0,
-            "angle_limit": 200.0,
         }
 
         if loss_weights is not None:
@@ -514,13 +321,6 @@ class HandOptimizer:
         left_hand_pose_init,
         right_hand_pose_init
     ):
-        """
-        Computes all single-image hand fitting losses.
-
-        estimate_2d_lh: [1, 21, 2]
-        estimate_2d_rh: [1, 21, 2]
-        target_2d:      [2, 21, 2]
-        """
         pred_lh = estimate_2d_lh[0]
         pred_rh = estimate_2d_rh[0]
         pred_lh_3d = estimate_3d_lh[0]
@@ -564,36 +364,15 @@ class HandOptimizer:
 
         loss_bone = loss_bone_lh + loss_bone_rh
 
-        # loss_pose = (
-        #     pose_deviation_prior(left_hand_pose, left_hand_pose_init)
-        #     + pose_deviation_prior(right_hand_pose, right_hand_pose_init)
-        # )
-
-        loss_angle = (
-            axis_angle_limit_loss(left_hand_pose, is_right=False)
-            + axis_angle_limit_loss(right_hand_pose, is_right=True)
-        )
-        
-        # loss_depth = (
-        #     relative_depth_loss(pred_lh_3d, target_lh_3d)
-        #     + relative_depth_loss(pred_rh_3d, target_rh_3d)
-        # )
-
         total_loss = (
             self.loss_weights["kp2d"] * loss_2d
             + self.loss_weights["bone_dir"] * loss_bone
-            # + self.loss_weights["pose_prior"] * loss_pose
-            + self.loss_weights["angle_limit"] * loss_angle
-            # + self.loss_weights["depth_rel"] * loss_depth
         )
 
         loss_dict = {
             "total": total_loss,
             "kp2d": loss_2d.detach(),
             "bone_dir": loss_bone.detach(),
-            # "pose_prior": loss_pose.detach(),
-            "angle_limit": loss_angle.detach(),
-            # "depth_rel": loss_depth.detach()
         }
 
         return total_loss, loss_dict
@@ -617,17 +396,6 @@ class HandOptimizer:
         print_every=10,
         save_overlays=True
     ):
-        """
-        Refine left and right SMPL-X hand poses for a single image.
-
-        target_mp should be shaped [2, 21, 2] or [2, 21, 3].
-        Expected order:
-            target_mp[0] = left hand
-            target_mp[1] = right hand
-
-        Expected joint order:
-            Wrist, Index, Middle, Ring, Pinky, Thumb
-        """
 
         global_orient = global_orient.to(self.device).float()
         body_pose = body_pose.to(self.device).float()
@@ -638,7 +406,6 @@ class HandOptimizer:
         bbox_scale = bbox_scale.to(self.device).float()
         target_mp = target_mp.to(self.device).float()
 
-        # Make hand poses leaf tensors for optimization.
         left_hand_pose = (
             left_hand_pose
             .clone()
@@ -658,7 +425,6 @@ class HandOptimizer:
         )
         right_wrist = body_pose[:, 20].clone().requires_grad_(True)
 
-        # Keep initial pose as a soft prior.
         left_hand_pose_init = left_hand_pose.clone().detach()
         right_hand_pose_init = right_hand_pose.clone().detach()
 
@@ -666,8 +432,15 @@ class HandOptimizer:
             [left_hand_pose, right_hand_pose, left_wrist, right_wrist],
             lr=lr
         )
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[100, 200], gamma=0.1)
+        
+        bone_start, bone_end = 150.0, 5.0
 
         for epoch in range(num_epochs):
+            progress = epoch / max(1, num_epochs - 1)
+            
+            self.loss_weights["bone_dir"] = bone_start * ((bone_end / bone_start) ** progress)
+
             opt.zero_grad()
 
             smplx_output = self.model(
@@ -678,9 +451,6 @@ class HandOptimizer:
                 betas=betas
             )
 
-            body_joints = smplx_output.joints
-
-            # SMPL-X hand joint slices used in your original code.
             left_wrist_joint = smplx_output.joints[:, 20]
             lh_joints = smplx_output.joints[:, 25:40, :]
             right_wrist_joint = smplx_output.joints[:, 21]
@@ -727,8 +497,6 @@ class HandOptimizer:
                 dim=0
             )
 
-            # Only x/y are used for fitting.
-            # Do not treat MediaPipe z as confidence.
             target_2d = target_mp[:, :, :2]
 
             if save_overlays and epoch == 0:
@@ -758,18 +526,19 @@ class HandOptimizer:
                 epoch % print_every == 0
                 or epoch == num_epochs - 1
             ):
+                # Added current LR to the print statement for visibility
+                current_lr = opt.param_groups[0]['lr']
                 print(
                     f"Epoch {epoch + 1:04d}/{num_epochs} | "
+                    f"LR: {current_lr:.4f} | "
                     f"total: {loss_dict['total'].item():.4f} | "
                     f"kp2d: {loss_dict['kp2d'].item():.4f} | "
                     f"bone: {loss_dict['bone_dir'].item():.4f} | "
-                    # f"pose: {loss_dict['pose_prior'].item():.6f} | "
-                    f"angle: {loss_dict['angle_limit'].item():.6f} | "
-                    # f"depth: {loss_dict['depth_rel'].item():.6f} | "
                 )
 
             total_loss.backward()
             opt.step()
+            scheduler.step()
 
         if save_overlays:
             with torch.no_grad():
@@ -848,24 +617,14 @@ class HandOptimizer:
         w_acc=100.0,
         print_every=20
     ):
-        """
-        Args:
-            left_hand_pose: Tensor of shape [B, 15, 3] or [B, 45]
-            right_hand_pose: Tensor of shape [B, 15, 3] or [B, 45]
-        Task:
-            Optimizes the hand pose sequence across consecutive frames 
-            using temporal smoothness priors.
-        """
         B = left_hand_pose.shape[0]
         if B < 3:
             print("Sequence too short for full temporal smoothing (needs B >= 3). Skipping.")
             return left_hand_pose, right_hand_pose
 
-        # Detach and move to target device as static reference targets (Data Prior)
         left_init = left_hand_pose.clone().detach().to(self.device).float()
         right_init = right_hand_pose.clone().detach().to(self.device).float()
 
-        # Create leaf tensors that we will optimize
         left_opt = left_init.clone().requires_grad_(True)
         right_opt = right_init.clone().requires_grad_(True)
 
@@ -874,21 +633,17 @@ class HandOptimizer:
         for epoch in range(num_epochs):
             optimizer.zero_grad()
 
-            # 1. Data Term: Prevent parameters from drifting far from initial frame-wise estimates
             loss_data = torch.mean((left_opt - left_init) ** 2) + \
                         torch.mean((right_opt - right_init) ** 2)
 
-            # 2. Velocity Term (1st derivative): Minimize frame-to-frame jitter
             vel_left = left_opt[1:] - left_opt[:-1]
             vel_right = right_opt[1:] - right_opt[:-1]
             loss_vel = torch.mean(vel_left ** 2) + torch.mean(vel_right ** 2)
 
-            # 3. Acceleration Term (2nd derivative): Encourage smooth, continuous motion curves
             acc_left = left_opt[2:] - 2 * left_opt[1:-1] + left_opt[:-2]
             acc_right = right_opt[2:] - 2 * right_opt[1:-1] + right_opt[:-2]
             loss_acc = torch.mean(acc_left ** 2) + torch.mean(acc_right ** 2)
 
-            # Combine losses
             total_loss = (w_data * loss_data) + (w_vel * loss_vel) + (w_acc * loss_acc)
 
             total_loss.backward()

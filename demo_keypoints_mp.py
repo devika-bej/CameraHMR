@@ -34,7 +34,7 @@ def init_detector(threshold):
     return DefaultPredictor_Lazy(detectron2_cfg)
 
 
-def process_image(args, image_path, detector, pose_model, hands_model, output_folder, estimation_data):
+def process_image(args, image_path, detector, hands_model, output_folder, estimation_data):
     """Process a single image, extract MP keypoints inside Detectron bboxes, and save visualization."""
     img_cv2 = cv2.imread(str(image_path))
     if img_cv2 is None:
@@ -110,12 +110,6 @@ def process_image(args, image_path, detector, pose_model, hands_model, output_fo
                 # print(hand_landmarks)
         
         image_results.append(person_kps)
-        # print(f"Person {ind}:")
-        # print(json.dumps({
-        #     'bbox': person_kps['bbox'],
-        #     'pose': person_kps['pose'].tolist() if person_kps['pose'] is not None else None,
-        #     'hands': [{'label': h['label'], 'keypoints': h['keypoints'].tolist()} for h in person_kps['hands']]
-        # }, indent=2))
         for hand in person_kps['hands']:
             if hand['label'] == 'Left':
                 estimation_data['mediapipe_kp_left'].append(hand['keypoints'])
@@ -124,8 +118,8 @@ def process_image(args, image_path, detector, pose_model, hands_model, output_fo
 
     save_filename = os.path.join(output_folder, Path(image_path).name)
     cv2.imwrite(save_filename, crop_resized)
-    save_filename = os.path.join(output_folder, f"annotated_{Path(image_path).name}")
-    cv2.imwrite(save_filename, crop_rgb)
+    # save_filename = os.path.join(output_folder, f"annotated_{Path(image_path).name}")
+    # cv2.imwrite(save_filename, crop_rgb)
     print(f"Processed and saved: {save_filename}")
 
 
@@ -135,6 +129,7 @@ def main():
     parser.add_argument('--out_folder', type=str, default='demo_out', help='Output folder')
     parser.add_argument('--detector_threshold', type=float, default=0.5, help='Detection threshold for Detectron2')
     parser.add_argument('--npz_file', type=str, default='demo_out_mediapipe.npz', help='Path to save keypoints in .npz format')
+    parser.add_argument('--static', type=bool, default=False)
 
     args = parser.parse_args()
 
@@ -143,8 +138,7 @@ def main():
     os.makedirs(args.out_folder, exist_ok=True)
     
     # Initialize MediaPipe instances
-    pose_model = mp_pose.Pose(static_image_mode=True, model_complexity=2)
-    hands_model = mp_hands.Hands(static_image_mode=True, max_num_hands=2)
+    hands_model = mp_hands.Hands(static_image_mode=args.static, max_num_hands=2)
 
     image_extensions = ('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.webp')
     image_paths = [img for ext in image_extensions for img in glob(os.path.join(args.img_folder, ext))]
@@ -157,7 +151,7 @@ def main():
     estimation_data['mediapipe_kp_right'] = []
     
     for img_path in image_paths:
-        process_image(args, img_path, detector, pose_model, hands_model, args.out_folder, estimation_data)
+        process_image(args, img_path, detector, hands_model, args.out_folder, estimation_data)
     
     # Save extracted dictionary keypoints as an npz file
     np.savez(args.npz_file, **estimation_data)
