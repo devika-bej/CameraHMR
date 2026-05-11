@@ -19,6 +19,7 @@ def main(args):
     # Initialize only the Hand Optimizer
     hand_refiner = HandOptimizer()
     inp_data = np.load(init_param_file, allow_pickle=True)
+    # inp_data = dict(inp_data)
 
     processed_data = {key: [] for key in inp_data}
 
@@ -56,10 +57,10 @@ def main(args):
         processed_data["cam_int"].append(cam_int_np)
         processed_data["cam_t"].append(cam_t_np)
         processed_data["shape"].append(inp_data["shape"][i])
-        processed_data["global_orient"].append(global_orient)
-        processed_data["body_pose"].append(body_pose)
+        processed_data["global_orient"].append(global_orient[0])
+        processed_data["body_pose"].append(body_pose[0])
 
-        left_hand_pose, right_hand_pose = hand_refiner.refine(
+        left_hand_pose, right_hand_pose, left_wrist, right_wrist = hand_refiner.refine(
             global_orient=global_orient,
             body_pose=body_pose,
             left_hand_pose=left_hand_pose,
@@ -75,7 +76,9 @@ def main(args):
         
         processed_data["left_hand_pose"].append(left_hand_pose[0].detach().cpu().numpy())
         processed_data["right_hand_pose"].append(right_hand_pose[0].detach().cpu().numpy())
-
+        processed_data["body_pose"][-1][19] = left_wrist
+        processed_data["body_pose"][-1][20] = right_wrist
+    
     # Save results# Convert any remaining tensors in the lists to numpy arrays
     for key in processed_data:
         processed_data[key] = [

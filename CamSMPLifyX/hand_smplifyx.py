@@ -5,6 +5,8 @@ import numpy as np
 import os
 import cv2
 
+import torch.nn.functional as F
+
 from utils.image_utils import crop
 from utils.smplx_openpose import SMPLX_
 
@@ -239,21 +241,22 @@ def robust_2d_reprojection_loss(pred_2d, target_2d, valid_mask=None, delta=25.0)
 
     Returns a scalar.
     """
-    diff = pred_2d - target_2d
-    err = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-8)
+    return torch.mean(F.huber_loss(pred_2d, target_2d))
+    # diff = pred_2d - target_2d
+    # err = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-8)
 
-    # Huber on Euclidean pixel error.
-    # For small errors: quadratic.
-    # For large errors: linear, so noisy MediaPipe points do not dominate.
-    quadratic = 0.5 * (err ** 2) / delta
-    linear = err - 0.5 * delta
+    # # Huber on Euclidean pixel error.
+    # # For small errors: quadratic.
+    # # For large errors: linear, so noisy MediaPipe points do not dominate.
+    # quadratic = 0.5 * (err ** 2) / delta
+    # linear = err - 0.5 * delta
 
-    loss_per_joint = torch.where(err < delta, quadratic, linear)
+    # loss_per_joint = torch.where(err < delta, quadratic, linear)
 
-    if valid_mask is None:
-        return loss_per_joint.mean()
+    # if valid_mask is None:
+    #     return loss_per_joint.mean()
 
-    return masked_mean(loss_per_joint, valid_mask)
+    # return masked_mean(loss_per_joint, valid_mask)
 
 
 def bone_direction_loss(pred_2d, target_2d, valid_mask=None, eps=1e-6):
@@ -280,30 +283,32 @@ def bone_direction_loss(pred_2d, target_2d, valid_mask=None, eps=1e-6):
     start_idx = bones[:, 0]
     end_idx = bones[:, 1]
 
-    pred_vec = pred_2d[end_idx] - pred_2d[start_idx]
-    targ_vec = target_2d[end_idx] - target_2d[start_idx]
+    pred_vec = pred_2d[..., end_idx, :] - pred_2d[..., start_idx, :]
+    targ_vec = target_2d[..., end_idx, :] - target_2d[..., start_idx, :]
+    
+    return torch.mean(1 - F.cosine_similarity(pred_vec, targ_vec, eps=eps))
 
-    pred_len = torch.linalg.norm(pred_vec, dim=-1).clamp_min(eps)
-    targ_len = torch.linalg.norm(targ_vec, dim=-1).clamp_min(eps)
+    # pred_len = torch.linalg.norm(pred_vec, dim=-1).clamp_min(eps)
+    # targ_len = torch.linalg.norm(targ_vec, dim=-1).clamp_min(eps)
 
-    pred_dir = pred_vec / pred_len.unsqueeze(-1)
-    targ_dir = targ_vec / targ_len.unsqueeze(-1)
+    # pred_dir = pred_vec / pred_len.unsqueeze(-1)
+    # targ_dir = targ_vec / targ_len.unsqueeze(-1)
 
-    cosine = torch.sum(pred_dir * targ_dir, dim=-1)
-    cosine = cosine.clamp(min=-1.0, max=1.0)
+    # cosine = torch.sum(pred_dir * targ_dir, dim=-1)
+    # cosine = cosine.clamp(min=-1.0, max=1.0)
 
-    loss_per_bone = 1.0 - cosine
+    # loss_per_bone = 1.0 - cosine
 
-    bone_valid = torch.ones(
-        len(HAND_BONES),
-        device=device,
-        dtype=torch.bool
-    )
+    # bone_valid = torch.ones(
+    #     len(HAND_BONES),
+    #     device=device,
+    #     dtype=torch.bool
+    # )
 
-    if valid_mask is not None:
-        bone_valid = valid_mask[start_idx] & valid_mask[end_idx]
+    # if valid_mask is not None:
+    #     bone_valid = valid_mask[start_idx] & valid_mask[end_idx]
 
-    return masked_mean(loss_per_bone, bone_valid)
+    # return masked_mean(loss_per_bone, bone_valid)
 
 
 def pose_deviation_prior(current_pose, initial_pose):
@@ -378,40 +383,56 @@ def matrix_to_euler_angles(matrix):
     return torch.stack([x, y, z], dim=-1)
 
 
-def axis_angle_limit_loss(hand_pose, max_angle=1.5):
+def axis_angle_limit_loss(hand_pose, is_right=True):
     """
     Soft limit on axis-angle magnitudes.
 
     hand_pose is usually [1, 45] for 15 hand joints x 3 axis-angle values.
     This is a simple anatomical regularizer to discourage extreme rotations.
     """
-    # hand_pose shape: [batch, 45] (15 joints x 3)
     pose = hand_pose.reshape(-1, 3)
     
-    # 1. Convert axis-angle to Rotation Matrices, then to Euler Angles
     rot_mats = axis_angle_to_matrix(pose)
-    # Using 'XYZ' convention. You must check which axis your specific hand model 
-    # (like MANO) uses for flexion/extension. Let's assume it's X.
     euler_angles = matrix_to_euler_angles(rot_mats) 
     
-    # 2. Define anatomical limits (in radians) for each local axis
-    # X-axis (Flexion/Extension): Allow large forward bend, heavily penalize backward bend
-    x_min, x_max = -0.1, 1.6  # approx -5 deg to +90 deg
+    if not is_right:
+        x_min, x_max = -0.1745, 1.5708
+    else:
+        x_min, x_max = -1.5708, 0.1745
     
-    # Y and Z axes (Abduction/Twisting): Fingers don't twist or spread much
-    yz_limit = 0.2 # approx 11 degrees
+    yz_limit = 0.1745
     
-    # 3. Calculate excess for each axis independently
-    x_excess_upper = torch.relu(euler_angles[:, 0] - x_max)
-    x_excess_lower = torch.relu(x_min - euler_angles[:, 0]) # Penalizes going below x_min
+    x_excess_upper = torch.relu(euler_angles[1:, 0] - x_max)
+    x_excess_lower = torch.relu(x_min - euler_angles[1:, 0]) # Penalizes going below x_min
     
-    y_excess = torch.relu(torch.abs(euler_angles[:, 1]) - yz_limit)
-    z_excess = torch.relu(torch.abs(euler_angles[:, 2]) - yz_limit)
+    y_excess = torch.relu(torch.abs(euler_angles[1:, 1]) - yz_limit)
+    z_excess = torch.relu(torch.abs(euler_angles[1:, 2]) - yz_limit)
     
-    # 4. Combine all violations into a single loss
     total_excess = x_excess_upper + x_excess_lower + y_excess + z_excess
     
     return torch.mean(total_excess ** 2)
+
+
+def relative_depth_loss(pred_3d, target_3d, eps=1e-6):
+    """
+    Forces the Z-direction of the 3D mesh to match MediaPipe's predicted Z-direction.
+    pred_3d: [21, 3] (SMPL-X joints in camera space)
+    target_3d: [21, 3] (MediaPipe raw 3D output)
+    """
+    # Extract Z coordinates
+    pred_z = pred_3d[:, 2]
+    target_z = target_3d[:, 2]
+    
+    # Center depth around the wrist (index 0)
+    pred_z_rel = pred_z - pred_z[0]
+    target_z_rel = target_z - target_z[0]
+    
+    # Normalize by the scale of the hand to make them comparable
+    pred_norm = pred_z_rel / (torch.max(torch.abs(pred_z_rel)) + eps)
+    target_norm = target_z_rel / (torch.max(torch.abs(target_z_rel)) + eps)
+    
+    # MSE on the normalized depth profile
+    return torch.mean((pred_norm - target_norm) ** 2)
 
 
 class HandOptimizer:
@@ -431,12 +452,6 @@ class HandOptimizer:
         self.FINGER_TIPS_V_IDS_LH = [5361, 4933, 5058, 5169, 5286]
         self.FINGER_TIPS_V_IDS_RH = [8079, 7669, 7794, 7905, 8022]
 
-        # Mapping from your 21-point hand order:
-        # Wrist, Index, Middle, Ring, Pinky, Thumb
-        #
-        # 100 = wrist from body joints
-        # non-negative = SMPL-X hand joint index
-        # negative = fingertip vertex index
         self.MP_TO_MANO_MAP = [
             100,
             12, 13, 14, -1,
@@ -448,22 +463,22 @@ class HandOptimizer:
 
         self.loss_weights = {
             "kp2d": 1.0,
-            "bone_dir": 80.0,
-            "pose_prior": 0.05,
-            "angle_limit": 2.0,
+            "bone_dir": 150.0,
+            "angle_limit": 200.0,
         }
 
         if loss_weights is not None:
             self.loss_weights.update(loss_weights)
 
-    def get_mano_landmarks(self, body_joints, lh_joints, rh_joints, vertices):
+
+    def get_mano_landmarks(self, left_wrist, right_wrist, lh_joints, rh_joints, vertices):
         landmarks_lh = []
         landmarks_rh = []
 
         for idx in self.MP_TO_MANO_MAP:
             if idx == 100:
-                landmarks_lh.append(body_joints[:, 20, :])
-                landmarks_rh.append(body_joints[:, 21, :])
+                landmarks_lh.append(left_wrist)
+                landmarks_rh.append(right_wrist)
 
             elif idx >= 0:
                 landmarks_lh.append(lh_joints[:, idx, :])
@@ -485,11 +500,15 @@ class HandOptimizer:
 
         return landmarks_lh, landmarks_rh
 
+
     def compute_hand_losses(
         self,
         estimate_2d_lh,
         estimate_2d_rh,
+        estimate_3d_lh,
+        estimate_3d_rh,
         target_2d,
+        target_3d,
         left_hand_pose,
         right_hand_pose,
         left_hand_pose_init,
@@ -504,9 +523,13 @@ class HandOptimizer:
         """
         pred_lh = estimate_2d_lh[0]
         pred_rh = estimate_2d_rh[0]
+        pred_lh_3d = estimate_3d_lh[0]
+        pred_rh_3d = estimate_3d_rh[0]
 
         target_lh = target_2d[0]
         target_rh = target_2d[1]
+        target_lh_3d = target_3d[0]
+        target_rh_3d = target_3d[1]
 
         valid_lh = valid_keypoint_mask(target_lh)
         valid_rh = valid_keypoint_mask(target_rh)
@@ -541,32 +564,40 @@ class HandOptimizer:
 
         loss_bone = loss_bone_lh + loss_bone_rh
 
-        loss_pose = (
-            pose_deviation_prior(left_hand_pose, left_hand_pose_init)
-            + pose_deviation_prior(right_hand_pose, right_hand_pose_init)
-        )
+        # loss_pose = (
+        #     pose_deviation_prior(left_hand_pose, left_hand_pose_init)
+        #     + pose_deviation_prior(right_hand_pose, right_hand_pose_init)
+        # )
 
         loss_angle = (
-            axis_angle_limit_loss(left_hand_pose, max_angle=1)
-            + axis_angle_limit_loss(right_hand_pose, max_angle=1)
+            axis_angle_limit_loss(left_hand_pose, is_right=False)
+            + axis_angle_limit_loss(right_hand_pose, is_right=True)
         )
+        
+        # loss_depth = (
+        #     relative_depth_loss(pred_lh_3d, target_lh_3d)
+        #     + relative_depth_loss(pred_rh_3d, target_rh_3d)
+        # )
 
         total_loss = (
             self.loss_weights["kp2d"] * loss_2d
             + self.loss_weights["bone_dir"] * loss_bone
-            + self.loss_weights["pose_prior"] * loss_pose
+            # + self.loss_weights["pose_prior"] * loss_pose
             + self.loss_weights["angle_limit"] * loss_angle
+            # + self.loss_weights["depth_rel"] * loss_depth
         )
 
         loss_dict = {
             "total": total_loss,
             "kp2d": loss_2d.detach(),
             "bone_dir": loss_bone.detach(),
-            "pose_prior": loss_pose.detach(),
+            # "pose_prior": loss_pose.detach(),
             "angle_limit": loss_angle.detach(),
+            # "depth_rel": loss_depth.detach()
         }
 
         return total_loss, loss_dict
+
 
     def refine(
         self,
@@ -616,7 +647,7 @@ class HandOptimizer:
             .float()
             .requires_grad_(True)
         )
-
+        left_wrist = body_pose[:, 19].clone().requires_grad_(True)
         right_hand_pose = (
             right_hand_pose
             .clone()
@@ -625,13 +656,14 @@ class HandOptimizer:
             .float()
             .requires_grad_(True)
         )
+        right_wrist = body_pose[:, 20].clone().requires_grad_(True)
 
         # Keep initial pose as a soft prior.
         left_hand_pose_init = left_hand_pose.clone().detach()
         right_hand_pose_init = right_hand_pose.clone().detach()
 
         opt = torch.optim.Adam(
-            [left_hand_pose, right_hand_pose],
+            [left_hand_pose, right_hand_pose, left_wrist, right_wrist],
             lr=lr
         )
 
@@ -649,11 +681,14 @@ class HandOptimizer:
             body_joints = smplx_output.joints
 
             # SMPL-X hand joint slices used in your original code.
+            left_wrist_joint = smplx_output.joints[:, 20]
             lh_joints = smplx_output.joints[:, 25:40, :]
+            right_wrist_joint = smplx_output.joints[:, 21]
             rh_joints = smplx_output.joints[:, 40:55, :]
 
             estimate_3d_lh, estimate_3d_rh = self.get_mano_landmarks(
-                body_joints,
+                left_wrist_joint,
+                right_wrist_joint,
                 lh_joints,
                 rh_joints,
                 smplx_output.vertices
@@ -703,13 +738,16 @@ class HandOptimizer:
                     bbox_scale,
                     estimate_2d.detach().cpu().numpy(),
                     target_2d.detach().cpu().numpy(),
-                    "initial_overlay.png"
+                    f"initial_overlay_{os.path.basename(img_path)}"
                 )
 
             total_loss, loss_dict = self.compute_hand_losses(
                 estimate_2d_lh=estimate_2d_lh,
                 estimate_2d_rh=estimate_2d_rh,
+                estimate_3d_lh=estimate_3d_lh,
+                estimate_3d_rh=estimate_3d_rh,
                 target_2d=target_2d,
+                target_3d=target_mp,
                 left_hand_pose=left_hand_pose,
                 right_hand_pose=right_hand_pose,
                 left_hand_pose_init=left_hand_pose_init,
@@ -725,8 +763,9 @@ class HandOptimizer:
                     f"total: {loss_dict['total'].item():.4f} | "
                     f"kp2d: {loss_dict['kp2d'].item():.4f} | "
                     f"bone: {loss_dict['bone_dir'].item():.4f} | "
-                    f"pose: {loss_dict['pose_prior'].item():.6f} | "
-                    f"angle: {loss_dict['angle_limit'].item():.6f}"
+                    # f"pose: {loss_dict['pose_prior'].item():.6f} | "
+                    f"angle: {loss_dict['angle_limit'].item():.6f} | "
+                    # f"depth: {loss_dict['depth_rel'].item():.6f} | "
                 )
 
             total_loss.backward()
@@ -742,12 +781,14 @@ class HandOptimizer:
                     betas=betas
                 )
 
-                body_joints = smplx_output.joints
+                left_wrist_joint = smplx_output.joints[:, 20]
                 lh_joints = smplx_output.joints[:, 25:40, :]
+                right_wrist_joint = smplx_output.joints[:, 21]
                 rh_joints = smplx_output.joints[:, 40:55, :]
 
                 estimate_3d_lh, estimate_3d_rh = self.get_mano_landmarks(
-                    body_joints,
+                    left_wrist_joint,
+                    right_wrist_joint,
                     lh_joints,
                     rh_joints,
                     smplx_output.vertices
@@ -790,7 +831,76 @@ class HandOptimizer:
                     bbox_scale,
                     estimate_2d.detach().cpu().numpy(),
                     target_2d.detach().cpu().numpy(),
-                    "final_overlay.png"
+                    f"final_overlay_{os.path.basename(img_path)}"
                 )
 
-        return left_hand_pose, right_hand_pose
+        return left_hand_pose, right_hand_pose, left_wrist, right_wrist
+    
+    
+    def smoothen(
+        self, 
+        left_hand_pose, 
+        right_hand_pose,
+        num_epochs=200,
+        lr=0.01,
+        w_data=1.0,
+        w_vel=10.0,
+        w_acc=100.0,
+        print_every=20
+    ):
+        """
+        Args:
+            left_hand_pose: Tensor of shape [B, 15, 3] or [B, 45]
+            right_hand_pose: Tensor of shape [B, 15, 3] or [B, 45]
+        Task:
+            Optimizes the hand pose sequence across consecutive frames 
+            using temporal smoothness priors.
+        """
+        B = left_hand_pose.shape[0]
+        if B < 3:
+            print("Sequence too short for full temporal smoothing (needs B >= 3). Skipping.")
+            return left_hand_pose, right_hand_pose
+
+        # Detach and move to target device as static reference targets (Data Prior)
+        left_init = left_hand_pose.clone().detach().to(self.device).float()
+        right_init = right_hand_pose.clone().detach().to(self.device).float()
+
+        # Create leaf tensors that we will optimize
+        left_opt = left_init.clone().requires_grad_(True)
+        right_opt = right_init.clone().requires_grad_(True)
+
+        optimizer = torch.optim.Adam([left_opt, right_opt], lr=lr)
+
+        for epoch in range(num_epochs):
+            optimizer.zero_grad()
+
+            # 1. Data Term: Prevent parameters from drifting far from initial frame-wise estimates
+            loss_data = torch.mean((left_opt - left_init) ** 2) + \
+                        torch.mean((right_opt - right_init) ** 2)
+
+            # 2. Velocity Term (1st derivative): Minimize frame-to-frame jitter
+            vel_left = left_opt[1:] - left_opt[:-1]
+            vel_right = right_opt[1:] - right_opt[:-1]
+            loss_vel = torch.mean(vel_left ** 2) + torch.mean(vel_right ** 2)
+
+            # 3. Acceleration Term (2nd derivative): Encourage smooth, continuous motion curves
+            acc_left = left_opt[2:] - 2 * left_opt[1:-1] + left_opt[:-2]
+            acc_right = right_opt[2:] - 2 * right_opt[1:-1] + right_opt[:-2]
+            loss_acc = torch.mean(acc_left ** 2) + torch.mean(acc_right ** 2)
+
+            # Combine losses
+            total_loss = (w_data * loss_data) + (w_vel * loss_vel) + (w_acc * loss_acc)
+
+            total_loss.backward()
+            optimizer.step()
+
+            if (epoch % print_every == 0) or (epoch == num_epochs - 1):
+                print(
+                    f"Smoothen Epoch {epoch + 1:04d}/{num_epochs} | "
+                    f"total: {total_loss.item():.4f} | "
+                    f"data: {loss_data.item():.4f} | "
+                    f"vel: {loss_vel.item():.4f} | "
+                    f"acc: {loss_acc.item():.4f}"
+                )
+
+        return left_opt.detach(), right_opt.detach()
