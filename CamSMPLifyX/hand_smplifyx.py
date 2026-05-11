@@ -271,7 +271,9 @@ class HandOptimizer:
 
         self.loss_weights = {
             "kp2d": 1.0,
-            "bone_dir": 150.0,
+            "bone_dir": 250.0,
+            "pose_prior": 500.0,  
+            "wrist_prior": 50.0, # <-- New prior to prevent wrist breaking
         }
 
         if loss_weights is not None:
@@ -319,17 +321,17 @@ class HandOptimizer:
         left_hand_pose,
         right_hand_pose,
         left_hand_pose_init,
-        right_hand_pose_init
+        right_hand_pose_init,
+        left_wrist,           # <-- Added wrist vars
+        right_wrist,          
+        left_wrist_init,      
+        right_wrist_init      
     ):
         pred_lh = estimate_2d_lh[0]
         pred_rh = estimate_2d_rh[0]
-        pred_lh_3d = estimate_3d_lh[0]
-        pred_rh_3d = estimate_3d_rh[0]
 
         target_lh = target_2d[0]
         target_rh = target_2d[1]
-        target_lh_3d = target_3d[0]
-        target_rh_3d = target_3d[1]
 
         valid_lh = valid_keypoint_mask(target_lh)
         valid_rh = valid_keypoint_mask(target_rh)
@@ -364,15 +366,43 @@ class HandOptimizer:
 
         loss_bone = loss_bone_lh + loss_bone_rh
 
+        # --- THE CONCRETE HINGE PRIOR (Fingers) ---
+        lh_joints = left_hand_pose.view(-1, 15, 3)
+        rh_joints = right_hand_pose.view(-1, 15, 3)
+
+        twist_yaw_penalty = torch.mean(lh_joints[:, :, 0:2] ** 2) + \
+                            torch.mean(rh_joints[:, :, 0:2] ** 2)
+
+        rh_backward_violation = F.relu(-rh_joints[:, :, 2]) 
+        lh_backward_violation = F.relu(lh_joints[:, :, 2])  
+
+        loss_hinge = torch.mean(rh_backward_violation ** 2) + \
+                     torch.mean(lh_backward_violation ** 2)
+
+        loss_pose_init = torch.mean((left_hand_pose - left_hand_pose_init) ** 2) + \
+                         torch.mean((right_hand_pose - right_hand_pose_init) ** 2)
+
+        total_pose_prior = (50.0 * loss_hinge) + (20.0 * twist_yaw_penalty) + (0.1 * loss_pose_init)
+        
+        # --- THE WRIST ANCHOR ---
+        # Prevent the optimizer from twisting the wrist to compensate for rigid fingers
+        loss_wrist = torch.mean((left_wrist - left_wrist_init) ** 2) + \
+                     torch.mean((right_wrist - right_wrist_init) ** 2)
+        # ------------------------
+
         total_loss = (
             self.loss_weights["kp2d"] * loss_2d
             + self.loss_weights["bone_dir"] * loss_bone
+            + self.loss_weights["pose_prior"] * total_pose_prior
+            + self.loss_weights["wrist_prior"] * loss_wrist # <-- Apply wrist penalty
         )
 
         loss_dict = {
             "total": total_loss,
             "kp2d": loss_2d.detach(),
             "bone_dir": loss_bone.detach(),
+            "pose_prior": total_pose_prior.detach(),
+            "wrist_prior": loss_wrist.detach(), # Add to log
         }
 
         return total_loss, loss_dict
@@ -427,6 +457,10 @@ class HandOptimizer:
 
         left_hand_pose_init = left_hand_pose.clone().detach()
         right_hand_pose_init = right_hand_pose.clone().detach()
+        
+        # Save wrist initial states
+        left_wrist_init = left_wrist.clone().detach()
+        right_wrist_init = right_wrist.clone().detach()
 
         opt = torch.optim.Adam(
             [left_hand_pose, right_hand_pose, left_wrist, right_wrist],
@@ -443,9 +477,16 @@ class HandOptimizer:
 
             opt.zero_grad()
 
+            # --- CRITICAL FIX ---
+            # Inject the optimized wrists back into the body_pose tensor 
+            # so the model actually updates them physically in 3D space
+            body_pose_opt = body_pose.clone()
+            body_pose_opt[:, 19] = left_wrist
+            body_pose_opt[:, 20] = right_wrist
+
             smplx_output = self.model(
                 global_orient=global_orient,
-                body_pose=body_pose,
+                body_pose=body_pose_opt, # <-- Pass the updated tensor
                 left_hand_pose=left_hand_pose,
                 right_hand_pose=right_hand_pose,
                 betas=betas
@@ -519,21 +560,25 @@ class HandOptimizer:
                 left_hand_pose=left_hand_pose,
                 right_hand_pose=right_hand_pose,
                 left_hand_pose_init=left_hand_pose_init,
-                right_hand_pose_init=right_hand_pose_init
+                right_hand_pose_init=right_hand_pose_init,
+                left_wrist=left_wrist,               # <-- Pass variables
+                right_wrist=right_wrist,
+                left_wrist_init=left_wrist_init,
+                right_wrist_init=right_wrist_init
             )
 
             if (
                 epoch % print_every == 0
                 or epoch == num_epochs - 1
             ):
-                # Added current LR to the print statement for visibility
                 current_lr = opt.param_groups[0]['lr']
                 print(
                     f"Epoch {epoch + 1:04d}/{num_epochs} | "
                     f"LR: {current_lr:.4f} | "
                     f"total: {loss_dict['total'].item():.4f} | "
                     f"kp2d: {loss_dict['kp2d'].item():.4f} | "
-                    f"bone: {loss_dict['bone_dir'].item():.4f} | "
+                    f"prior: {loss_dict['pose_prior'].item():.4f} | " 
+                    f"wrist: {loss_dict['wrist_prior'].item():.4f}" 
                 )
 
             total_loss.backward()
@@ -542,9 +587,14 @@ class HandOptimizer:
 
         if save_overlays:
             with torch.no_grad():
+                # Re-integrate for final output
+                body_pose_opt = body_pose.clone()
+                body_pose_opt[:, 19] = left_wrist
+                body_pose_opt[:, 20] = right_wrist
+
                 smplx_output = self.model(
                     global_orient=global_orient,
-                    body_pose=body_pose,
+                    body_pose=body_pose_opt,
                     left_hand_pose=left_hand_pose,
                     right_hand_pose=right_hand_pose,
                     betas=betas
@@ -613,8 +663,8 @@ class HandOptimizer:
         num_epochs=200,
         lr=0.01,
         w_data=1.0,
-        w_vel=10.0,
-        w_acc=100.0,
+        w_vel=20.0,
+        w_acc=200.0,
         print_every=20
     ):
         B = left_hand_pose.shape[0]
@@ -657,5 +707,9 @@ class HandOptimizer:
                     f"vel: {loss_vel.item():.4f} | "
                     f"acc: {loss_acc.item():.4f}"
                 )
-
-        return left_opt.detach(), right_opt.detach()
+        
+        return left_opt, right_opt
+    
+    
+    def stitch(self):
+        pass
