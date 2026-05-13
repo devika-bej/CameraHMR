@@ -6,6 +6,7 @@ import os
 import cv2
 
 import torch.nn.functional as F
+from scipy.signal import savgol_filter
 
 from utils.image_utils import crop
 from utils.smplx_openpose import SMPLX_
@@ -424,7 +425,7 @@ class HandOptimizer:
         num_epochs=300,
         lr=0.01,
         print_every=10,
-        save_overlays=True
+        save_overlays=False
     ):
 
         global_orient = global_orient.to(self.device).float()
@@ -477,9 +478,6 @@ class HandOptimizer:
 
             opt.zero_grad()
 
-            # --- CRITICAL FIX ---
-            # Inject the optimized wrists back into the body_pose tensor 
-            # so the model actually updates them physically in 3D space
             body_pose_opt = body_pose.clone()
             body_pose_opt[:, 19] = left_wrist
             body_pose_opt[:, 20] = right_wrist
@@ -660,6 +658,9 @@ class HandOptimizer:
         self, 
         left_hand_pose, 
         right_hand_pose,
+        fps=30,
+        window_sec=0.25,
+        polyorder=5,
         num_epochs=200,
         lr=0.01,
         w_data=1.0,
@@ -708,8 +709,217 @@ class HandOptimizer:
                     f"acc: {loss_acc.item():.4f}"
                 )
         
+        T = left_opt.shape[0]
+        window = int(round(window_sec * fps))
+        if window % 2 == 0:
+            window += 1
+        if window > T:
+            window = T if T % 2 == 1 else T - 1
+        if window <= polyorder:
+            return left_opt, right_opt
+        left_opt = savgol_filter(
+            left_opt.detach().cpu(),
+            window_length=window,
+            polyorder=polyorder,
+            axis=0,
+            mode="interp"
+        )
+        right_opt = savgol_filter(
+            right_opt.detach().cpu(),
+            window_length=window,
+            polyorder=polyorder,
+            axis=0,
+            mode="interp"
+        )    
         return left_opt, right_opt
     
     
-    def stitch(self):
-        pass
+    def stitch(
+        self,
+        global_orients,   # Tensor of shape (n_views, n_frames, 3)
+        body_poses,       # Tensor of shape (n_views, n_frames, 63)
+        left_hand_poses,  # Tensor of shape (n_views, n_frames, 45)
+        right_hand_poses, # Tensor of shape (n_views, n_frames, 45)
+        betas,            # Tensor of shape (n_views, 10) or (n_views, n_frames, 10)
+        cam_ints,
+        cam_ts,
+        num_epochs=400,
+        lr=0.001,
+        w_data=1.0,
+        w_pose_consistency=200.0,
+        w_shape_consistency=10.0,
+        w_vel=20.0,       # Temporal velocity weight
+        w_acc=200.0,      # Temporal acceleration weight
+        print_every=20
+    ):
+        V, T = global_orients.shape[:2]
+        
+        # 1. Initialize with front params (assuming view 0 is the primary/best view)
+        opt_global_orients = torch.tensor(global_orients[0]).clone().detach().to(self.device).requires_grad_(True)
+        opt_body_poses = torch.tensor(body_poses[0]).clone().detach().to(self.device).requires_grad_(True)
+        opt_left_hand_poses = torch.tensor(left_hand_poses[0]).clone().detach().to(self.device).requires_grad_(True)
+        opt_right_hand_poses = torch.tensor(right_hand_poses[0]).clone().detach().to(self.device).requires_grad_(True)
+        
+        if betas.dim() == 3:
+            opt_betas = torch.tensor(betas[0]).clone().detach().to(self.device).requires_grad_(True)
+        else:
+            opt_betas = torch.tensor(betas[0]).clone().detach().unsqueeze(0).repeat(T, 1).to(self.device).requires_grad_(True)
+            
+        optimizer = torch.optim.Adam([
+            opt_global_orients, 
+            opt_body_poses, 
+            opt_left_hand_poses, 
+            opt_right_hand_poses, 
+            opt_betas
+        ], lr=lr)
+
+        # ---------------------------------------------------------------------
+        # Pre-compute the 3D Target Joints for all views to save computation
+        # ---------------------------------------------------------------------
+        print("Pre-computing 3D targets for multi-view consensus...")
+        target_joints_all_views = []
+        target_betas_all_views = []
+        target_confs_all_views = []
+        
+        with torch.no_grad():
+            for v in range(V):
+                view_joints = []
+                view_betas = []
+                view_confs = []
+                
+                # Loop through frames to avoid SMPL-X default batch size mismatch
+                for t in range(T):
+                    v_go = torch.tensor(global_orients[v, t:t+1]).to(self.device)
+                    v_bp = torch.tensor(body_poses[v, t:t+1]).to(self.device)
+                    v_lhp = torch.tensor(left_hand_poses[v, t:t+1]).to(self.device)
+                    v_rhp = torch.tensor(right_hand_poses[v, t:t+1]).to(self.device)
+                    v_cint = torch.tensor(cam_ints[v, t:t+1]).to(self.device)
+                    v_ct = torch.tensor(cam_ts[v, t:t+1]).to(self.device)
+                    
+                    if betas.dim() == 3:
+                        v_beta = torch.tensor(betas[v, t:t+1]).to(self.device)
+                    else:
+                        v_beta = torch.tensor(betas[v]).unsqueeze(0).to(self.device)
+
+                    # Generate target SMPL-X mesh for this specific frame
+                    v_smplx_out = self.model(
+                        global_orient=v_go,
+                        body_pose=v_bp,
+                        left_hand_pose=v_lhp,
+                        right_hand_pose=v_rhp,
+                        betas=v_beta
+                    )
+                    
+                    view_joints.append(v_smplx_out.joints)
+                    view_betas.append(v_beta)
+                    v_proj = perspective_projection(v_smplx_out.joints[0], v_ct[0], v_cint[0])
+                    view_confs.append(v_proj[:, 2])
+                
+                # Concatenate the T individual frames back into a single tensor for this view
+                target_joints_all_views.append(torch.cat(view_joints, dim=0))
+                target_betas_all_views.append(torch.cat(view_betas, dim=0))
+                target_confs_all_views.append(torch.cat(view_confs, dim=0))
+                
+        # Stack targets into shape (V, T, num_joints, 3)
+        target_joints = torch.stack(target_joints_all_views, dim=0)
+        target_betas = torch.stack(target_betas_all_views, dim=0)
+        target_confs = torch.stack(target_confs_all_views, dim=0)
+
+        # ---------------------------------------------------------------------
+        # Optimization Loop
+        # ---------------------------------------------------------------------
+        for epoch in range(num_epochs):
+            optimizer.zero_grad()
+            
+            loss_data = 0.0
+            loss_prior = 0.0
+            
+            # Loop over frames
+            for t in range(T):
+                curr_go = opt_global_orients[t:t+1]
+                curr_bp = opt_body_poses[t:t+1]
+                curr_lhp = opt_left_hand_poses[t:t+1]
+                curr_rhp = opt_right_hand_poses[t:t+1]
+                curr_beta = opt_betas[t:t+1]
+                
+                # Forward pass canonical parameters through SMPL-X
+                smplx_out = self.model(
+                    global_orient=curr_go,
+                    body_pose=curr_bp,
+                    left_hand_pose=curr_lhp,
+                    right_hand_pose=curr_rhp,
+                    betas=curr_beta
+                )
+                curr_joints = smplx_out.joints
+                
+                # Geometric Multi-View Consensus Loss (Joint Space)
+                for v in range(V):
+                    v_joints = target_joints[v, t:t+1]
+                    v_beta_target = target_betas[v, t:t+1]
+                    weight = target_confs[v, t:t+1]
+                    
+                    # 3D Joint MSE weighted by the view's confidence
+                    joint_loss = torch.mean(weight * (curr_joints - v_joints)**2)
+                    
+                    # Still apply a small penalty in parameter space for shape, 
+                    # as shape (betas) is inherently global and latent
+                    shape_loss = torch.mean((curr_beta - v_beta_target)**2)
+                    
+                    loss_data += joint_loss + (w_shape_consistency / max(1, w_data)) * shape_loss
+                
+                # Anatomical Priors (Hinge and Twist)
+                lh_joints_t = curr_lhp.view(-1, 15, 3)
+                rh_joints_t = curr_rhp.view(-1, 15, 3)
+                
+                twist_yaw_penalty = torch.mean(lh_joints_t[:, :, 0:2] ** 2) + \
+                                    torch.mean(rh_joints_t[:, :, 0:2] ** 2)
+                                    
+                rh_backward = F.relu(-rh_joints_t[:, :, 2]) 
+                lh_backward = F.relu(lh_joints_t[:, :, 2])  
+                loss_hinge = torch.mean(rh_backward ** 2) + torch.mean(lh_backward ** 2)
+                
+                loss_prior += (50.0 * loss_hinge) + (20.0 * twist_yaw_penalty)
+                
+            loss_data = loss_data / (T * V)
+            loss_prior = loss_prior / T
+            
+            # Temporal Consistency Priors (Velocity and Acceleration)
+            if T > 2:
+                vel_go = opt_global_orients[1:] - opt_global_orients[:-1]
+                vel_bp = opt_body_poses[1:] - opt_body_poses[:-1]
+                vel_lh = opt_left_hand_poses[1:] - opt_left_hand_poses[:-1]
+                vel_rh = opt_right_hand_poses[1:] - opt_right_hand_poses[:-1]
+                
+                loss_vel = torch.mean(vel_go**2) + torch.mean(vel_bp**2) + \
+                           torch.mean(vel_lh**2) + torch.mean(vel_rh**2)
+                           
+                acc_go = opt_global_orients[2:] - 2*opt_global_orients[1:-1] + opt_global_orients[:-2]
+                acc_bp = opt_body_poses[2:] - 2*opt_body_poses[1:-1] + opt_body_poses[:-2]
+                acc_lh = opt_left_hand_poses[2:] - 2*opt_left_hand_poses[1:-1] + opt_left_hand_poses[:-2]
+                acc_rh = opt_right_hand_poses[2:] - 2*opt_right_hand_poses[1:-1] + opt_right_hand_poses[:-2]
+                
+                loss_acc = torch.mean(acc_go**2) + torch.mean(acc_bp**2) + \
+                           torch.mean(acc_lh**2) + torch.mean(acc_rh**2)
+            else:
+                loss_vel = torch.tensor(0.0, device=self.device)
+                loss_acc = torch.tensor(0.0, device=self.device)
+                
+            total_loss = (w_data * loss_data) + \
+                         (w_pose_consistency * loss_prior) + \
+                         (w_vel * loss_vel) + \
+                         (w_acc * loss_acc)
+
+            total_loss.backward()
+            optimizer.step()
+            
+            if (epoch % print_every == 0) or (epoch == num_epochs - 1):
+                print(
+                    f"Stitch Epoch {epoch + 1:04d}/{num_epochs} | "
+                    f"Total: {total_loss.item():.4f} | "
+                    f"Data (Geom): {loss_data.item():.6f} | "
+                    f"Prior: {loss_prior.item():.4f} | "
+                    f"Vel: {loss_vel.item():.4f} | "
+                    f"Acc: {loss_acc.item():.4f}"
+                )
+
+        return opt_global_orients, opt_body_poses, opt_left_hand_poses, opt_right_hand_poses, opt_betas
