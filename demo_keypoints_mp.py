@@ -110,11 +110,20 @@ def process_image(args, image_path, detector, hands_model, output_folder, estima
                 # print(hand_landmarks)
         
         image_results.append(person_kps)
+        got_left = False
+        got_right = False
         for hand in person_kps['hands']:
             if hand['label'] == 'Left':
+                got_left = True
                 estimation_data['mediapipe_kp_left'].append(hand['keypoints'])
             else:
+                got_right = True
                 estimation_data['mediapipe_kp_right'].append(hand['keypoints'])
+        
+        if not got_left:
+            estimation_data['mediapipe_kp_left'].append(estimation_data['mediapipe_kp_left'][-1])
+        if not got_right:
+            estimation_data['mediapipe_kp_right'].append(estimation_data['mediapipe_kp_right'][-1])
 
     save_filename = os.path.join(output_folder, Path(image_path).name)
     cv2.imwrite(save_filename, crop_resized)
