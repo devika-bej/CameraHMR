@@ -59,6 +59,8 @@ def process_image(args, image_path, detector, hands_model, output_folder, estima
     image_results = []
 
     # 2. Iterate over detected persons
+    left_over_left = 0
+    left_over_right = 0
     for ind, box in enumerate(boxes):
         x1, y1, x2, y2 = map(int, box)
         
@@ -114,16 +116,30 @@ def process_image(args, image_path, detector, hands_model, output_folder, estima
         got_right = False
         for hand in person_kps['hands']:
             if hand['label'] == 'Left':
+                while left_over_left > 0:
+                    estimation_data['mediapipe_kp_left'][-left_over_left] = hand['keypoints']
+                    left_over_left -= 1
                 got_left = True
                 estimation_data['mediapipe_kp_left'].append(hand['keypoints'])
             else:
+                while left_over_right > 0:
+                    estimation_data['mediapipe_kp_right'][-left_over_right] = hand['keypoints']
+                    left_over_right -= 1
                 got_right = True
                 estimation_data['mediapipe_kp_right'].append(hand['keypoints'])
         
         if not got_left:
-            estimation_data['mediapipe_kp_left'].append(estimation_data['mediapipe_kp_left'][-1])
+            if ind != 0:
+                estimation_data['mediapipe_kp_left'].append(estimation_data['mediapipe_kp_left'][-1])
+            else:
+                left_over_left += 1
+                estimation_data['mediapipe_kp_left'].append(np.zeros((21, 3)))
         if not got_right:
-            estimation_data['mediapipe_kp_right'].append(estimation_data['mediapipe_kp_right'][-1])
+            if ind != 0:
+                estimation_data['mediapipe_kp_right'].append(estimation_data['mediapipe_kp_right'][-1])
+            else:
+                left_over_right += 1
+                estimation_data['mediapipe_kp_right'].append(np.zeros((21, 3)))
 
     save_filename = os.path.join(output_folder, Path(image_path).name)
     cv2.imwrite(save_filename, crop_resized)
