@@ -1,13 +1,76 @@
 import numpy as np
 import sys
 import torch
+import smplx
+import os
 import cv2
 
-# Import the SMPLX model wrapper with OpenPose mapping
 from CamSMPLifyX.utils.smplx_openpose import SMPLX_
-# Import projection and HandOptimizer utilities
-from CamSMPLifyX.hand_smplifyx import perspective_projection, j2d_processing, HandOptimizer
-from CamSMPLifyX.constants import SMPLX_MODEL_DIR, NUM_BETAS_SMPLX
+from CamSMPLifyX.constants import (
+    SMPLX_MODEL_DIR,
+    NUM_BETAS_SMPLX,
+)
+
+def get_transform(center, scale, res):
+    """Generate affine transform matrix from original image to crop space."""
+    h = 200 * scale
+
+    t = torch.zeros(3, 3, device=center.device, dtype=center.dtype)
+
+    t[0, 0] = res[1] / h[0]
+    t[1, 1] = res[0] / h[1]
+
+    t[0, 2] = res[1] * (-center[0].float() / h[0] + 0.5)
+    t[1, 2] = res[0] * (-center[1].float() / h[1] + 0.5)
+
+    t[2, 2] = 1.0
+
+    return t
+
+
+def transform(pts, center, scale, res):
+    """Transform pixel locations into crop coordinate system."""
+    t = get_transform(center, scale, res)
+
+    ones_column = torch.ones(
+        pts.shape[0],
+        1,
+        device=pts.device,
+        dtype=pts.dtype
+    )
+
+    pts_homo = torch.cat((pts, ones_column), dim=1)
+    new_pts = torch.matmul(t, pts_homo.t()).t()
+
+    new_pts = new_pts[:, :2] / new_pts[:, 2].unsqueeze(1)
+
+    return new_pts + 1.0
+
+
+def j2d_processing(kp, center, scale):
+    """Project original-image 2D points into the 768x768 crop space."""
+    kp_transformed = transform(kp + 1.0, center, scale, [IMG_RES, IMG_RES])
+    return kp_transformed
+
+
+def perspective_projection(points, translation, cam_intrinsics):
+    """
+    Project 3D points using camera translation and intrinsics.
+    """
+    K = cam_intrinsics
+
+    points_translated = points + translation.unsqueeze(0)
+
+    z = points_translated[:, 2].unsqueeze(-1).clamp(min=1e-6)
+
+    projected_points = points_translated / z
+    projected_points = torch.einsum(
+        "ij,kj->ki",
+        K,
+        projected_points.float()
+    )
+
+    return projected_points
 
 def evaluate(estimate, openpose):
     n_frames = estimate['imgname'].shape[0]
@@ -16,108 +79,33 @@ def evaluate(estimate, openpose):
     rhand_errs = []
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Initialize the SMPLX_ model with OpenPose joint regressor
-    model = SMPLX_(
-        SMPLX_MODEL_DIR,
-        num_betas=NUM_BETAS_SMPLX,
-        use_pca=False
-    ).to(device)
-    
-    # We will use the HandOptimizer to extract proper MANO/OpenPose hand joints from vertices and joints
-    hand_opt = HandOptimizer(device=device)
+    model = SMPLX_(SMPLX_MODEL_DIR, num_betas=NUM_BETAS_SMPLX, use_pca=False).to(device)
     
     for i in range(n_frames):
-        # Shape: (N_joints, 3) where the 3rd column is confidence
         op_body = openpose['body_pose'][i]
         op_lhand = openpose['left_hand_pose'][i]
         op_rhand = openpose['right_hand_pose'][i]
         
-        # 1. Get SMPLX parameters for the current frame
-        global_orient = torch.tensor(estimate['global_orient'][i:i+1]).to(device).float()
-        body_pose = torch.tensor(estimate['body_pose'][i:i+1]).to(device).float()
-        left_hand_pose = torch.tensor(estimate['left_hand_pose'][i:i+1]).to(device).float()
-        right_hand_pose = torch.tensor(estimate['right_hand_pose'][i:i+1]).to(device).float()
-        betas = torch.tensor(estimate['shape'][i:i+1]).to(device).float()
-        
-        cam_t = torch.tensor(estimate['cam_t'][i]).to(device).float()
-        cam_int = torch.tensor(estimate['cam_int'][i]).to(device).float()
-        
-        # 2. Forward pass through SMPLX
-        with torch.no_grad():
-            smplx_out = model(
-                global_orient=global_orient,
-                body_pose=body_pose,
-                left_hand_pose=left_hand_pose,
-                right_hand_pose=right_hand_pose,
-                betas=betas
-            )
-            
-            # --- Get Body Joints ---
-            # smplx_openpose maps output.body_joints to the 25 OpenPose joints automatically
-            body_3d = smplx_out.joints[0, :25] 
-            
-            # --- Get Hand Joints using hand_smplifyx logic ---
-            left_wrist_joint = smplx_out.joints[:, 20]
-            right_wrist_joint = smplx_out.joints[:, 21]
-            lh_joints = smplx_out.joints[:, 25:40, :]
-            rh_joints = smplx_out.joints[:, 40:55, :]
-            
-            estimate_3d_lh, estimate_3d_rh = hand_opt.get_mano_landmarks(
-                left_wrist_joint,
-                right_wrist_joint,
-                lh_joints,
-                rh_joints,
-                smplx_out.vertices
-            )
-            
-            # 3. Project 3D points to 2D
-            est_body_2d = perspective_projection(body_3d, cam_t, cam_int)
-            est_lhand_2d = perspective_projection(estimate_3d_lh[0], cam_t, cam_int)
-            est_rhand_2d = perspective_projection(estimate_3d_rh[0], cam_t, cam_int)
-            
-            # If the estimate uses cropping (bbox_center / bbox_scale exist), project to crop space.
-            if 'bbox_center' in estimate and 'bbox_scale' in estimate:
-                bbox_center = torch.tensor(estimate['bbox_center'][i]).to(device).float()
-                bbox_scale = torch.tensor(estimate['bbox_scale'][i]).to(device).float()
-                
-                est_body_2d = j2d_processing(est_body_2d[:, :2], bbox_center, bbox_scale)
-                est_lhand_2d = j2d_processing(est_lhand_2d[:, :2], bbox_center, bbox_scale)
-                est_rhand_2d = j2d_processing(est_rhand_2d[:, :2], bbox_center, bbox_scale)
-            else:
-                est_body_2d = est_body_2d[:, :2]
-                est_lhand_2d = est_lhand_2d[:, :2]
-                est_rhand_2d = est_rhand_2d[:, :2]
-            
-            # Convert tensors back to numpy for evaluation
-            est_body_2d = est_body_2d.cpu().numpy()
-            est_lhand_2d = est_lhand_2d.cpu().numpy()
-            est_rhand_2d = est_rhand_2d.cpu().numpy()
-            
-            # 4. Calculate MSE separately for body, left hand, right hand (using valid keypoints)
-            def compute_mse(pred, target):
-                # valid_mask = target[:, 2] > 0.0  # OpenPose confidence > 0
-                # if np.sum(valid_mask) == 0:
-                #     return None
-                return np.mean((pred - target) ** 2)
-            
-            err_body = compute_mse(est_body_2d, op_body)
-            if err_body is not None:
-                body_errs.append(err_body)
-                
-            err_lhand = compute_mse(est_lhand_2d, op_lhand)
-            if err_lhand is not None:
-                lhand_errs.append(err_lhand)
-                
-            err_rhand = compute_mse(est_rhand_2d, op_rhand)
-            if err_rhand is not None:
-                rhand_errs.append(err_rhand)
+        global_orient = torch.tensor(np.expand_dims(estimate["global_orient"][i], axis=0)).to(device).float()
+        cam_int_np = estimate["cam_int"][i]
+        cam_t_np = estimate["cam_t"][i]
+        center = torch.tensor(estimate["center"][i]).to(device).float()
+        scale = torch.tensor(estimate["scale"][i]).to(device).float()
 
-    # Print overall statistics
-    print(f"Evaluation over {n_frames} frames:")
-    print(f"Mean Body MSE:       {np.mean(body_errs):.4f}" if body_errs else "Mean Body MSE:       N/A")
-    print(f"Mean Left Hand MSE:  {np.mean(lhand_errs):.4f}" if lhand_errs else "Mean Left Hand MSE:  N/A")
-    print(f"Mean Right Hand MSE: {np.mean(rhand_errs):.4f}" if rhand_errs else "Mean Right Hand MSE: N/A")
+        body_pose = torch.tensor(np.expand_dims(estimate["body_pose"][i], axis=0)).to(device).float()
+        left_hand_pose = torch.tensor(np.expand_dims(estimate["left_hand_pose"][i], axis=0)).to(device).float()
+        right_hand_pose = torch.tensor(np.expand_dims(estimate["right_hand_pose"][i], axis=0)).to(device).float()
+        betas = torch.tensor(np.expand_dims(estimate["shape"][i], axis=0)).to(device).float()
+        
+        c_int = torch.tensor(cam_int_np).unsqueeze(0).to(device).float()
+        c_t = torch.tensor(cam_t_np).to(device).float()
+        
+        smplx_output = model(
+            global_orient=global_orient,
+            body_pose=body_pose,
+            left_hand_pose=left_hand_pose,
+            right_hand_pose=right_hand_pose,
+            betas=betas)
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
@@ -128,7 +116,7 @@ if __name__ == "__main__":
     openpose_file = sys.argv[2]
     
     # Load the estimated and OpenPose keypoints
-    estimate = np.load(estimate_file, allow_pickle=True) # Make sure to extract dictionary if saved using np.savez/dict
+    estimate = np.load(estimate_file, allow_pickle=True)
     openpose = np.load(openpose_file, allow_pickle=True)
     
     evaluate(estimate, openpose)
