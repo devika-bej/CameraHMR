@@ -3,7 +3,7 @@ import torch
 import pickle
 import smplx
 from smplx import SMPLX as SMPLX_
-from constants import SMPL_to_J19, SMPLX2SMPL, SMPL_MODEL_DIR
+from .constants import SMPL_to_J19, SMPLX2SMPL, SMPL_MODEL_DIR
 from smplx.utils import ModelOutput, SMPLOutput
 from smplx.lbs import vertices2joints
 
