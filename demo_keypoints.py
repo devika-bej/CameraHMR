@@ -112,7 +112,7 @@ def main():
     for ind, img_path in enumerate(image_paths):
         process_image(args, img_path, model, detector, device, args.out_folder, estimation_data)
     
-    np.savez(args.npz_file, **estimation_data)
+#    np.savez(args.npz_file, **estimation_data)
 
 
 if __name__ == '__main__':

@@ -8,10 +8,10 @@ import cv2
 import torch.nn.functional as F
 from scipy.signal import savgol_filter
 
-from .utils.image_utils import crop
-from .utils.smplx_openpose import SMPLX_
+from utils.image_utils import crop
+from utils.smplx_openpose import SMPLX_
 
-from .constants import (
+from constants import (
     SMPLX_MODEL_DIR,
     NUM_BETAS_SMPLX,
     SMPLX2SMPL,
