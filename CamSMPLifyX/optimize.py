@@ -70,7 +70,7 @@ def main(args):
             cam_int=c_int,
             bbox_center=center,
             bbox_scale=scale,
-            target_mp=torch.tensor(np.stack([mediapipe_kp_right, mediapipe_kp_left])).to(device).float(),
+            target_mp=torch.tensor(np.stack([mediapipe_kp_left, mediapipe_kp_right])).to(device).float(),
             img_path=img_path
         )
         
