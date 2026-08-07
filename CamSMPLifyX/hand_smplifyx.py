@@ -21,6 +21,13 @@ from constants import (
     HIGH_THRESHOLD,
 )
 
+import mediapipe as mp
+from mediapipe.framework.formats import landmark_pb2
+
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+
 
 MANO_JOINT_NAMES = [
     "Wrist",
@@ -53,87 +60,48 @@ HAND_BONES = [
 IMG_RES = 768
 
 
+def visualize_hand_reprojections(crop_img, left_2d, right_2d, img_res=768):
+    """
+    Overlays initial (Red) and final (Green) reprojected hand landmarks onto the crop image.
+    
+    initial_2d / final_2d: Tensors or Arrays of shape (21, 2) in crop pixel coordinates.
+    """
+    canvas = crop_img.copy()
+
+    def draw_landmarks(pts_2d, color):
+        pts = pts_2d.detach().cpu().numpy() if hasattr(pts_2d, 'detach') else pts_2d
+        
+        # Convert pixel coordinates [0, IMG_RES] to MediaPipe normalized [0.0, 1.0]
+        landmark_list = landmark_pb2.NormalizedLandmarkList()
+        for pt in pts:
+            landmark_list.landmark.add(
+                x=float(pt[0] / img_res),
+                y=float(pt[1] / img_res),
+                z=0.0
+            )
+            
+        mp_drawing.draw_landmarks(
+            canvas,
+            landmark_list,
+            mp_hands.HAND_CONNECTIONS,
+            mp_drawing.DrawingSpec(color=color, thickness=2, circle_radius=3),
+            mp_drawing_styles.get_default_hand_connections_style(),
+        )
+
+    # Draw Initial Estimate (e.g., Red) and Final Estimate (e.g., Green)
+    if left_2d is not None:
+        draw_landmarks(left_2d, color=(0, 0, 255))   # Red
+    if right_2d is not None:
+        draw_landmarks(right_2d, color=(0, 255, 0))     # Green
+
+    return canvas
+
+
 def _safe_int_point(pt):
     """Convert a 2D point to int tuple if finite, otherwise return None."""
     if not np.isfinite(pt).all():
         return None
     return int(pt[0]), int(pt[1])
-
-
-def _save_overlay(image_path, bbox_center, bbox_scale, mano_proj, mp_xy, out_path):
-    """Draw MANO projections and MediaPipe targets on the cropped image."""
-    img = cv2.imread(image_path)
-
-    if img is None:
-        print(f"  Could not load image from {image_path}")
-        return
-
-    img = crop(
-        img,
-        bbox_center.detach().cpu().numpy(),
-        bbox_scale.detach().cpu().numpy(),
-        [IMG_RES, IMG_RES]
-    )
-
-    img = np.clip(img, 0, 255).astype(np.uint8)
-    img = np.ascontiguousarray(img)
-
-    colors = {
-        "mano_left": (255, 80, 80),      
-        "mp_left": (80, 255, 80),        
-        "mano_right": (255, 255, 80),    
-        "mp_right": (80, 180, 255),      
-        "line_left": (0, 0, 255),        
-        "line_right": (255, 0, 255),     
-    }
-
-    for hand_idx, hand_name in enumerate(["left", "right"]):
-        mano_hand = mano_proj[hand_idx]
-        mp_hand = mp_xy[hand_idx]
-
-        if hand_name == "left":
-            mano_color = colors["mano_left"]
-            mp_color = colors["mp_left"]
-            line_color = colors["line_left"]
-        else:
-            mano_color = colors["mano_right"]
-            mp_color = colors["mp_right"]
-            line_color = colors["line_right"]
-
-        for j in range(len(MANO_JOINT_NAMES)):
-            mano_pt = _safe_int_point(mano_hand[j])
-            mp_pt = _safe_int_point(mp_hand[j])
-
-            if mano_pt is not None:
-                cv2.circle(img, mano_pt, 6, mano_color, -1)
-
-            if mp_pt is not None:
-                cv2.circle(img, mp_pt, 6, mp_color, -1)
-
-            if mano_pt is not None and mp_pt is not None:
-                cv2.line(img, mano_pt, mp_pt, line_color, 1)
-
-    cv2.putText(
-        img,
-        "Left: MANO blue, MP green",
-        (20, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2
-    )
-
-    cv2.putText(
-        img,
-        "Right: MANO cyan, MP orange",
-        (20, 60),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2
-    )
-
-    cv2.imwrite(out_path, img)
 
 
 def get_transform(center, scale, res):
@@ -272,9 +240,9 @@ class HandOptimizer:
 
         self.loss_weights = {
             "kp2d": 1.0,
-            "bone_dir": 250.0,
-            "pose_prior": 500.0,  
-            "wrist_prior": 50.0, # <-- New prior to prevent wrist breaking
+            "bone_dir": 150.0,
+            "pose_prior": 100.0,  
+            "wrist_prior": 0.0,
         }
 
         if loss_weights is not None:
@@ -354,14 +322,14 @@ class HandOptimizer:
         loss_2d = loss_2d_lh + loss_2d_rh
 
         loss_bone_lh = bone_direction_loss(
-            pred_lh,
-            target_lh,
+            estimate_3d_lh,
+            target_3d[0],
             valid_mask=valid_lh
         )
 
         loss_bone_rh = bone_direction_loss(
-            pred_rh,
-            target_rh,
+            estimate_3d_rh,
+            target_3d[1],
             valid_mask=valid_rh
         )
 
@@ -383,7 +351,7 @@ class HandOptimizer:
         loss_pose_init = torch.mean((left_hand_pose - left_hand_pose_init) ** 2) + \
                          torch.mean((right_hand_pose - right_hand_pose_init) ** 2)
 
-        total_pose_prior = (50.0 * loss_hinge) + (20.0 * twist_yaw_penalty) + (0.1 * loss_pose_init)
+        total_pose_prior = (0.0 * loss_hinge) + (5.0 * twist_yaw_penalty) + (0.0 * loss_pose_init)
         
         # --- THE WRIST ANCHOR ---
         # Prevent the optimizer from twisting the wrist to compensate for rigid fingers
@@ -395,7 +363,7 @@ class HandOptimizer:
             self.loss_weights["kp2d"] * loss_2d
             + self.loss_weights["bone_dir"] * loss_bone
             + self.loss_weights["pose_prior"] * total_pose_prior
-            + self.loss_weights["wrist_prior"] * loss_wrist # <-- Apply wrist penalty
+            + self.loss_weights["wrist_prior"] * loss_wrist
         )
 
         loss_dict = {
@@ -425,7 +393,6 @@ class HandOptimizer:
         num_epochs=300,
         lr=0.01,
         print_every=10,
-        save_overlays=False
     ):
 
         global_orient = global_orient.to(self.device).float()
@@ -468,13 +435,25 @@ class HandOptimizer:
             lr=lr
         )
         scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[100, 200], gamma=0.1)
-        
-        bone_start, bone_end = 150.0, 5.0
+
+        with torch.no_grad():
+            init_smplx_out = self.model(
+                global_orient=global_orient,
+                body_pose=body_pose,
+                left_hand_pose=left_hand_pose_init,
+                right_hand_pose=right_hand_pose_init,
+                betas=betas
+            )
+            init_lh_3d, init_rh_3d = self.get_mano_landmarks(
+                init_smplx_out.joints[:, 20], init_smplx_out.joints[:, 21],
+                init_smplx_out.joints[:, 25:40, :], init_smplx_out.joints[:, 40:55, :],
+                init_smplx_out.vertices
+            )
+            init_2d_lh = j2d_processing(perspective_projection(init_lh_3d[0], cam_t, cam_int[0])[:, :2], bbox_center, bbox_scale)
+            init_2d_rh = j2d_processing(perspective_projection(init_rh_3d[0], cam_t, cam_int[0])[:, :2], bbox_center, bbox_scale)
 
         for epoch in range(num_epochs):
             progress = epoch / max(1, num_epochs - 1)
-            
-            self.loss_weights["bone_dir"] = bone_start * ((bone_end / bone_start) ** progress)
 
             opt.zero_grad()
 
@@ -538,16 +517,6 @@ class HandOptimizer:
 
             target_2d = target_mp[:, :, :2]
 
-            if save_overlays and epoch == 0:
-                _save_overlay(
-                    img_path,
-                    bbox_center,
-                    bbox_scale,
-                    estimate_2d.detach().cpu().numpy(),
-                    target_2d.detach().cpu().numpy(),
-                    f"initial_overlay_{os.path.basename(img_path)}"
-                )
-
             total_loss, loss_dict = self.compute_hand_losses(
                 estimate_2d_lh=estimate_2d_lh,
                 estimate_2d_rh=estimate_2d_rh,
@@ -582,74 +551,26 @@ class HandOptimizer:
             total_loss.backward()
             opt.step()
             scheduler.step()
+            
+        final_2d_lh = estimate_2d_lh[0].detach()
+        final_2d_rh = estimate_2d_rh[0].detach()
 
-        if save_overlays:
-            with torch.no_grad():
-                # Re-integrate for final output
-                body_pose_opt = body_pose.clone()
-                body_pose_opt[:, 19] = left_wrist
-                body_pose_opt[:, 20] = right_wrist
+        # 3. Load image, render reprojections, and save output
+        if img_path and os.path.exists(img_path):
+            base_img = cv2.imread(img_path)
+            # Crop to align with crop coordinate system
+            crop_img = crop(base_img, bbox_center.cpu().numpy(), bbox_scale.cpu().numpy(), [IMG_RES, IMG_RES]).astype(np.uint8)
 
-                smplx_output = self.model(
-                    global_orient=global_orient,
-                    body_pose=body_pose_opt,
-                    left_hand_pose=left_hand_pose,
-                    right_hand_pose=right_hand_pose,
-                    betas=betas
-                )
+            # Draw Left and Right hand projections
+            vis_img_init = visualize_hand_reprojections(crop_img, init_2d_lh, init_2d_rh, IMG_RES)
+            vis_img_final = visualize_hand_reprojections(crop_img, final_2d_lh, final_2d_rh, IMG_RES)
 
-                left_wrist_joint = smplx_output.joints[:, 20]
-                lh_joints = smplx_output.joints[:, 25:40, :]
-                right_wrist_joint = smplx_output.joints[:, 21]
-                rh_joints = smplx_output.joints[:, 40:55, :]
-
-                estimate_3d_lh, estimate_3d_rh = self.get_mano_landmarks(
-                    left_wrist_joint,
-                    right_wrist_joint,
-                    lh_joints,
-                    rh_joints,
-                    smplx_output.vertices
-                )
-
-                estimate_2d_lh = perspective_projection(
-                    estimate_3d_lh[0],
-                    cam_t,
-                    cam_int[0]
-                )
-
-                estimate_2d_lh = j2d_processing(
-                    estimate_2d_lh[:, :2],
-                    bbox_center,
-                    bbox_scale
-                ).unsqueeze(0)
-
-                estimate_2d_rh = perspective_projection(
-                    estimate_3d_rh[0],
-                    cam_t,
-                    cam_int[0]
-                )
-
-                estimate_2d_rh = j2d_processing(
-                    estimate_2d_rh[:, :2],
-                    bbox_center,
-                    bbox_scale
-                ).unsqueeze(0)
-
-                estimate_2d = torch.cat(
-                    (estimate_2d_lh, estimate_2d_rh),
-                    dim=0
-                )
-
-                target_2d = target_mp[:, :, :2]
-
-                _save_overlay(
-                    img_path,
-                    bbox_center,
-                    bbox_scale,
-                    estimate_2d.detach().cpu().numpy(),
-                    target_2d.detach().cpu().numpy(),
-                    f"final_overlay_{os.path.basename(img_path)}"
-                )
+            # Save to disk
+            save_path_init = f"reprojection_init_{os.path.basename(img_path)}"
+            save_path_final = f"reprojection_final_{os.path.basename(img_path)}"
+            cv2.imwrite(save_path_init, vis_img_init)
+            cv2.imwrite(save_path_final, vis_img_final)
+            print(f"Saved hand reprojection visualization to {save_path_init} and {save_path_final}")
 
         return left_hand_pose, right_hand_pose, left_wrist, right_wrist
     
