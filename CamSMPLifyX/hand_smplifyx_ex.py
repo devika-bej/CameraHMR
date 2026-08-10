@@ -225,6 +225,12 @@ class HandOptimizer:
             num_betas=NUM_BETAS_SMPLX,
             use_pca=False
         ).to(self.device)
+        self.model_pca = SMPLX_(
+            SMPLX_MODEL_DIR,
+            num_betas=NUM_BETAS_SMPLX,
+            use_pca=True,
+            num_pca_comps=15
+        ).to(self.device)
 
         self.FINGER_TIPS_V_IDS_LH = [5361, 4933, 5058, 5169, 5286]
         self.FINGER_TIPS_V_IDS_RH = [8079, 7669, 7794, 7905, 8022]
@@ -239,10 +245,10 @@ class HandOptimizer:
         ]
 
         self.loss_weights = {
-            "kp2d": 1.0,
-            "bone_dir": 150.0,
-            "pose_prior": 100.0,  
-            "wrist_prior": 0.0,
+            "kp2d": 5.0,
+            "bone_dir": 250.0,
+            "pose_prior": 1.0,  
+            "wrist_prior": 50.0,
         }
 
         if loss_weights is not None:
@@ -294,7 +300,8 @@ class HandOptimizer:
         left_wrist,           # <-- Added wrist vars
         right_wrist,          
         left_wrist_init,      
-        right_wrist_init      
+        right_wrist_init,
+        is_pca_stage=False      
     ):
         pred_lh = estimate_2d_lh[0]
         pred_rh = estimate_2d_rh[0]
@@ -334,25 +341,28 @@ class HandOptimizer:
         )
 
         loss_bone = loss_bone_lh + loss_bone_rh
-
-        # --- THE CONCRETE HINGE PRIOR (Fingers) ---
-        lh_joints = left_hand_pose.view(-1, 15, 3)
-        rh_joints = right_hand_pose.view(-1, 15, 3)
-
-        twist_yaw_penalty = torch.mean(lh_joints[:, :, 0:2] ** 2) + \
-                            torch.mean(rh_joints[:, :, 0:2] ** 2)
-
-        rh_backward_violation = F.relu(-rh_joints[:, :, 2]) 
-        lh_backward_violation = F.relu(lh_joints[:, :, 2])  
-
-        loss_hinge = torch.mean(rh_backward_violation ** 2) + \
-                     torch.mean(lh_backward_violation ** 2)
-
-        loss_pose_init = torch.mean((left_hand_pose - left_hand_pose_init) ** 2) + \
-                         torch.mean((right_hand_pose - right_hand_pose_init) ** 2)
-
-        total_pose_prior = (0.0 * loss_hinge) + (5.0 * twist_yaw_penalty) + (0.0 * loss_pose_init)
         
+        if is_pca_stage:
+            total_pose_prior = torch.mean(left_hand_pose ** 2) + torch.mean(right_hand_pose ** 2)
+        else:
+        # --- THE CONCRETE HINGE PRIOR (Fingers) ---
+            lh_joints = left_hand_pose.view(-1, 15, 3)
+            rh_joints = right_hand_pose.view(-1, 15, 3)
+
+            twist_yaw_penalty = torch.mean(lh_joints[:, :, 0:2] ** 2) + \
+                                torch.mean(rh_joints[:, :, 0:2] ** 2)
+
+            rh_backward_violation = F.relu(-rh_joints[:, :, 2]) 
+            lh_backward_violation = F.relu(lh_joints[:, :, 2])  
+
+            loss_hinge = torch.mean(rh_backward_violation ** 2) + \
+                        torch.mean(lh_backward_violation ** 2)
+
+            loss_pose_init = torch.mean((left_hand_pose - left_hand_pose_init) ** 2) + \
+                            torch.mean((right_hand_pose - right_hand_pose_init) ** 2)
+
+            total_pose_prior = (50.0 * loss_hinge) + (20.0 * twist_yaw_penalty) + (0.005 * loss_pose_init)
+            
         # --- THE WRIST ANCHOR ---
         # Prevent the optimizer from twisting the wrist to compensate for rigid fingers
         loss_wrist = torch.mean((left_wrist - left_wrist_init) ** 2) + \
@@ -404,6 +414,8 @@ class HandOptimizer:
         bbox_scale = bbox_scale.to(self.device).float()
         target_mp = target_mp.to(self.device).float()
 
+
+        # non pca stage
         left_hand_pose = (
             left_hand_pose
             .clone()
@@ -452,7 +464,8 @@ class HandOptimizer:
             init_2d_lh = j2d_processing(perspective_projection(init_lh_3d[0], cam_t, cam_int[0])[:, :2], bbox_center, bbox_scale)
             init_2d_rh = j2d_processing(perspective_projection(init_rh_3d[0], cam_t, cam_int[0])[:, :2], bbox_center, bbox_scale)
 
-        for epoch in range(num_epochs):
+        num_epochs_opt = 200
+        for epoch in range(num_epochs_opt):
             progress = epoch / max(1, num_epochs - 1)
 
             opt.zero_grad()
@@ -554,25 +567,113 @@ class HandOptimizer:
             
         final_2d_lh = estimate_2d_lh[0].detach()
         final_2d_rh = estimate_2d_rh[0].detach()
+        
+        # pca stage
+        num_pca = self.model_pca.left_hand_components.shape[0]
+        lh_full = left_hand_pose.view(1, -1).to(self.device).float()
+        rh_full = right_hand_pose.view(1, -1).to(self.device).float()
 
-        # 3. Load image, render reprojections, and save output
-        if img_path and os.path.exists(img_path):
-            base_img = cv2.imread(img_path)
-            # Crop to align with crop coordinate system
-            crop_img = crop(base_img, bbox_center.cpu().numpy(), bbox_scale.cpu().numpy(), [IMG_RES, IMG_RES]).astype(np.uint8)
+        lh_pca_proj = torch.matmul(lh_full - self.model_pca.left_hand_mean, self.model_pca.left_hand_components.T)
+        rh_pca_proj = torch.matmul(rh_full - self.model_pca.right_hand_mean, self.model_pca.right_hand_components.T)
 
-            # Draw Left and Right hand projections
-            vis_img_init = visualize_hand_reprojections(crop_img, init_2d_lh, init_2d_rh, IMG_RES)
-            vis_img_final = visualize_hand_reprojections(crop_img, final_2d_lh, final_2d_rh, IMG_RES)
+        left_hand_pca = lh_pca_proj.clone().detach().requires_grad_(True)
+        right_hand_pca = rh_pca_proj.clone().detach().requires_grad_(True)
+        
+        left_wrist = body_pose[:, 19].clone().requires_grad_(True)
+        right_wrist = body_pose[:, 20].clone().requires_grad_(True)
+        
+        left_hand_pca_init = left_hand_pca.clone().detach()
+        right_hand_pca_init = right_hand_pca.clone().detach()
+        left_wrist_init = left_wrist.clone().detach()
+        right_wrist_init = right_wrist.clone().detach()
+        
+        opt = torch.optim.Adam(
+            [left_hand_pca, right_hand_pca, left_wrist, right_wrist],
+            lr=lr
+        )
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[400], gamma=0.1)
+        
+        bone_start, bone_end = 150.0, 5.0
 
-            # Save to disk
-            save_path_init = f"reprojection_init_{os.path.basename(img_path)}"
-            save_path_final = f"reprojection_final_{os.path.basename(img_path)}"
-            cv2.imwrite(save_path_init, vis_img_init)
-            cv2.imwrite(save_path_final, vis_img_final)
-            print(f"Saved hand reprojection visualization to {save_path_init} and {save_path_final}")
+        num_epochs_pca = 150
+        for epoch in range(num_epochs_pca):
+            progress = epoch / max(1, num_epochs - 1)
+            self.loss_weights["bone_dir"] = bone_start * ((bone_end / bone_start) ** progress)
+            opt.zero_grad()
 
-        return left_hand_pose, right_hand_pose, left_wrist, right_wrist
+            body_pose_opt = body_pose.clone()
+            body_pose_opt[:, 19] = left_wrist
+            body_pose_opt[:, 20] = right_wrist
+
+            smplx_output = self.model_pca(
+                global_orient=global_orient,
+                body_pose=body_pose_opt,
+                left_hand_pose=left_hand_pca,
+                right_hand_pose=right_hand_pca,
+                betas=betas
+            )
+
+            left_wrist_joint = smplx_output.joints[:, 20]
+            lh_joints = smplx_output.joints[:, 25:40, :]
+            right_wrist_joint = smplx_output.joints[:, 21]
+            rh_joints = smplx_output.joints[:, 40:55, :]
+
+            estimate_3d_lh, estimate_3d_rh = self.get_mano_landmarks(
+                left_wrist_joint, right_wrist_joint, lh_joints, rh_joints, smplx_output.vertices
+            )
+
+            estimate_2d_lh = perspective_projection(estimate_3d_lh[0], cam_t, cam_int[0])
+            estimate_2d_lh = j2d_processing(estimate_2d_lh[:, :2], bbox_center, bbox_scale).unsqueeze(0)
+
+            estimate_2d_rh = perspective_projection(estimate_3d_rh[0], cam_t, cam_int[0])
+            estimate_2d_rh = j2d_processing(estimate_2d_rh[:, :2], bbox_center, bbox_scale).unsqueeze(0)
+
+            estimate_2d = torch.cat((estimate_2d_lh, estimate_2d_rh), dim=0)
+            target_2d = target_mp[:, :, :2]
+
+            total_loss, loss_dict = self.compute_hand_losses(
+                estimate_2d_lh=estimate_2d_lh, estimate_2d_rh=estimate_2d_rh,
+                estimate_3d_lh=estimate_3d_lh, estimate_3d_rh=estimate_3d_rh,
+                target_2d=target_2d, target_3d=target_mp,
+                left_hand_pose=left_hand_pca, right_hand_pose=right_hand_pca,
+                left_hand_pose_init=left_hand_pca_init, right_hand_pose_init=right_hand_pca_init,
+                left_wrist=left_wrist, right_wrist=right_wrist,
+                left_wrist_init=left_wrist_init, right_wrist_init=right_wrist_init,
+                is_pca_stage=True
+            )
+
+            if epoch % print_every == 0 or epoch == num_epochs - 1:
+                print(f"Epoch {epoch + 1:04d}/{num_epochs} | LR: {opt.param_groups[0]['lr']:.4f} | total: {loss_dict['total'].item():.4f}")
+
+            total_loss.backward()
+            opt.step()
+            scheduler.step()      
+        
+        with torch.no_grad():
+            lh_full = torch.matmul(left_hand_pca, self.model_pca.left_hand_components) + self.model_pca.left_hand_mean
+            rh_full = torch.matmul(right_hand_pca, self.model_pca.right_hand_components) + self.model_pca.right_hand_mean
+            
+            lh_full = lh_full.view(1, 15, 3)
+            rh_full = rh_full.view(1, 15, 3)                                                                                                                                                                                                                                                                                                           
+
+#        # 3. Load image, render reprojections, and save output
+#        if img_path and os.path.exists(img_path):
+#            base_img = cv2.imread(img_path)
+#            # Crop to align with crop coordinate system
+#            crop_img = crop(base_img, bbox_center.cpu().numpy(), bbox_scale.cpu().numpy(), [IMG_RES, IMG_RES]).astype(np.uint8)
+
+#            # Draw Left and Right hand projections
+#            vis_img_init = visualize_hand_reprojections(crop_img, init_2d_lh, init_2d_rh, IMG_RES)
+#            vis_img_final = visualize_hand_reprojections(crop_img, final_2d_lh, final_2d_rh, IMG_RES)
+
+#            # Save to disk
+#            save_path_init = f"reprojection_init_{os.path.basename(img_path)}"
+#            save_path_final = f"reprojection_final_{os.path.basename(img_path)}"
+#            cv2.imwrite(save_path_init, vis_img_init)
+#            cv2.imwrite(save_path_final, vis_img_final)
+#            print(f"Saved hand reprojection visualization to {save_path_init} and {save_path_final}")
+
+        return lh_full, rh_full, left_wrist, right_wrist
     
     
     def smoothen(
